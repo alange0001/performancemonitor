@@ -14,6 +14,7 @@ import util
 
 import asyncio
 import argparse
+import signal
 
 #=============================================================================
 import logging
@@ -23,6 +24,7 @@ log.setLevel(logging.INFO)
 
 #=============================================================================
 class Program:
+	_stop = False
 	args = None
 
 	def parse_args(self):
@@ -42,8 +44,27 @@ class Program:
 	def main(self):
 		self.parse_args()
 
-		send_message = lambda message: self.send_message(message)
-		asyncio.run(send_message('Hello World!'))
+		for i in ('SIGINT', 'SIGTERM'):
+			signal.signal(getattr(signal, i),  lambda signumber, stack, signame=i: self.signal_handler(signame,  signumber, stack) )
+
+		try:
+			send_message = lambda message: self.send_message(message)
+			while not self._stop:
+				asyncio.run(send_message('stats'))
+
+		except Exception as e:
+			log.error('exception received: {}'.format(str(e)))
+			return 1
+
+		return 0
+
+	def stop(self):
+		if self._stop: return
+		self._stop = True
+
+	def signal_handler(self, signame, signumber, stack):
+		log.warning("signal {} received".format(signame))
+		self.stop()
 
 	async def send_message(self, message):
 		reader, writer = await asyncio.open_connection(
@@ -62,4 +83,4 @@ class Program:
 
 #=============================================================================
 if __name__ == '__main__':
-	exit(Program().main())
+	exit( Program().main() )

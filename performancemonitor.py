@@ -30,6 +30,7 @@ log.setLevel(logging.INFO)
 class Program:
 	_stop = False
 	_threads = None
+	_current_stats = None
 
 	args = None
 
@@ -44,23 +45,25 @@ class Program:
 			default=config.get_default_port(),
 			help='device')
 		parser.add_argument('-l', '--log_level', type=str,
-			default='INFO', choices=[ 'DEBUG', 'INFO' ],
+			default='INFO', choices=[ 'debug', 'DEBUG', 'info', 'INFO' ],
 			help='log level')
 		self.args = parser.parse_args()
 
-		log.setLevel(getattr(logging, self.args.log_level))
+		log.setLevel(getattr(logging, self.args.log_level.upper()))
 		log.info('Parameters: {}'.format(str(self.args)))
 
 	def main(self):
 		try:
 			log.info("Program initiated")
-			signal.signal(signal.SIGTERM, lambda signumber, stack: self.signal_handler('SIGTERM', signumber, stack) )
-			signal.signal(signal.SIGINT,  lambda signumber, stack: self.signal_handler('SIGINT',  signumber, stack) )
+			for i in ('SIGINT', 'SIGTERM'):
+				signal.signal(getattr(signal, i),  lambda signumber, stack, signame=i: self.signal_handler(signame,  signumber, stack) )
 
 			self.startThread( CmdServer(self) )
 
+			self.collectStats()
 			while not self._stop:
-				time.sleep(0.5)
+				time.sleep(5)
+				self.collectStats()
 
 		except Exception as e:
 			log.critical("exception received: {}".format(str(e)))
@@ -82,9 +85,30 @@ class Program:
 		for t in self._threads:
 			t.join()
 
-	def signal_handler(self, signame, signumber, *args):
+	def signal_handler(self, signame, signumber, stack):
 		log.warning("signal {} received".format(signame))
 		self.stop()
+
+	def collectStats(self):
+		s = Stats(self._current_stats)
+		self._current_stats = s
+
+	def currentStats(self):
+		s = self._current_stats
+		return s
+
+#=============================================================================
+class Stats:
+	_counter = None
+
+	def __init__(self, old):
+		if old is not None: self._counter = old._counter+1
+		else:               self._counter = 0
+
+	def counter(self): return self._counter
+
+	def __str__(self):
+		return 'Stats: count={}'.format(self._counter)
 
 #=============================================================================
 class CmdServer (threading.Thread):
@@ -125,15 +149,39 @@ class CmdServer (threading.Thread):
 
 	async def handler(self, reader, writer):
 		log.debug("Starting handler...")
-		data = await reader.read(255)
-		message = data.decode()
-		addr = writer.get_extra_info('peername')
+		try:
+			addr = writer.get_extra_info('peername')
 
-		log.info(f"Received {message!r} from {addr!r}")
+			old_stats = self._program.currentStats()
 
-		log.debug(f"Send: {message!r}")
-		writer.write(data)
-		await writer.drain()
+			while not self._stop_thread:
+				data = await reader.read(255)
+				message = data.decode()
+				log.debug(f"Received {message!r} from {addr!r}")
+
+				if message == 'stats':
+					cur_stats = old_stats
+					while not self._stop_thread and cur_stats.counter() == old_stats.counter():
+						await asyncio.sleep(0.3)
+						cur_stats = self._program.currentStats()
+					if self._stop_thread:
+						break
+
+					write_message = str(cur_stats)
+					old_stats = cur_stats
+					log.debug(f"Send: {write_message!r}")
+					writer.write(write_message.encode())
+					await writer.drain()
+				elif message == 'stop':
+					writer.write('OK, stopping'.encode())
+					await writer.drain()
+					break
+				else:
+					writer.write('unknown command'.encode())
+					await writer.drain()
+					break
+		except Exception as e:
+			log.error('Exception received in CmdServer.handler: {}'.format(str(e)))
 
 		log.debug("Close the connection")
 		writer.close()
