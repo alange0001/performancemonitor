@@ -74,7 +74,7 @@ class Program:
 		writer.write(message.encode())
 		await writer.drain()
 
-		data = await reader.read(100)
+		data = await reader.read(2048)
 		log.info(f'Received: {data.decode()!r}')
 
 		log.info('Close the connection')

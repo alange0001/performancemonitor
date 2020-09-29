@@ -17,7 +17,9 @@ import asyncio
 import threading
 import argparse
 import signal
-import sys
+import collections
+import psutil
+import json
 
 #=============================================================================
 import logging
@@ -98,19 +100,6 @@ class Program:
 		return s
 
 #=============================================================================
-class Stats:
-	_counter = None
-
-	def __init__(self, old):
-		if old is not None: self._counter = old._counter+1
-		else:               self._counter = 0
-
-	def counter(self): return self._counter
-
-	def __str__(self):
-		return 'Stats: count={}'.format(self._counter)
-
-#=============================================================================
 class CmdServer (threading.Thread):
 	_program = None
 	_stop_thread = False
@@ -185,6 +174,38 @@ class CmdServer (threading.Thread):
 
 		log.debug("Close the connection")
 		writer.close()
+
+#=============================================================================
+class Stats:
+	_counter = None
+	_data = None
+	_old_data = None
+
+	def __init__(self, old):
+		if old is not None:
+			self._counter = old._counter+1
+			self._old_data = old._data
+		else:
+			self._counter = 0
+
+		self._data = collections.OrderedDict()
+
+		self.getCPU()
+
+	def getCPU(self):
+		self._data['cpu'] = collections.OrderedDict()
+		self._data['cpu']['cores'] = psutil.cpu_count(logical=False)
+		self._data['cpu']['threads'] = psutil.cpu_count(logical=True)
+		self._data['cpu']['count'] = self._data['cpu']['threads']
+		self._data['cpu']['times_total'] = psutil.cpu_times()
+		self._data['cpu']['times'] = psutil.cpu_times(percpu=True)
+
+		#sum_times = sum()
+
+	def counter(self): return self._counter
+
+	def __str__(self):
+		return 'STATS: {}'.format(json.dumps(self._data))
 
 #=============================================================================
 if __name__ == '__main__':
