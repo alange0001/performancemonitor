@@ -49,8 +49,7 @@ class Program:
 
 		try:
 			send_message = lambda message: self.send_message(message)
-			while not self._stop:
-				asyncio.run(send_message('stats'))
+			asyncio.run(self.client_main('stats'))
 
 		except Exception as e:
 			log.error('exception received: {}'.format(str(e)))
@@ -66,18 +65,27 @@ class Program:
 		log.warning("signal {} received".format(signame))
 		self.stop()
 
+	async def client_main(self, message):
+		task = asyncio.create_task( self.send_message(message) )
+		while not self._stop:
+			await asyncio.sleep(0.3)
+
 	async def send_message(self, message):
 		reader, writer = await asyncio.open_connection(
 			'127.0.0.1', self.args.port )
 
-		log.info(f'Send: {message!r}')
-		writer.write(message.encode())
+		while not self._stop:
+			log.debug(f'Send: {message!r}')
+			writer.write(message.encode())
+			await writer.drain()
+
+			data = await reader.read(1024 * 1024)
+			log.info(data.decode())
+
+		log.debug(f'Send: close')
+		writer.write('stop'.encode())
 		await writer.drain()
-
-		data = await reader.read(2048)
-		log.info(f'Received: {data.decode()!r}')
-
-		log.info('Close the connection')
+		log.debug('Close the connection')
 		writer.close()
 		await writer.wait_closed()
 

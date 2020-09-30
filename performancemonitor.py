@@ -20,6 +20,7 @@ import signal
 import collections
 import psutil
 import json
+import os
 
 #=============================================================================
 import logging
@@ -191,16 +192,76 @@ class Stats:
 		self._data = collections.OrderedDict()
 
 		self.getCPU()
+		self.getDisk()
+		self.getFS()
 
 	def getCPU(self):
+		#idle_times = [ 'idle', 'iowait', 'steal' ]
+		def getPercents(new, old):
+			sum_total = sum(new.values()) - sum(old.values())
+			ret = collections.OrderedDict()
+			for k in new.keys():
+				ret[k] = 100. * ((new[k]-old[k])/sum_total)
+			return ret
+
 		self._data['cpu'] = collections.OrderedDict()
 		self._data['cpu']['cores'] = psutil.cpu_count(logical=False)
 		self._data['cpu']['threads'] = psutil.cpu_count(logical=True)
 		self._data['cpu']['count'] = self._data['cpu']['threads']
-		self._data['cpu']['times_total'] = psutil.cpu_times()
-		self._data['cpu']['times'] = psutil.cpu_times(percpu=True)
+		#TODO register only the difference between current and old data
+		self._data['cpu']['times_total'] = self._toDict(psutil.cpu_times())
+		self._data['cpu']['times'] = self._toDict(psutil.cpu_times(percpu=True))
 
-		#sum_times = sum()
+		if self._old_data is not None:
+			self._data['cpu']['percent_total'] = getPercents(self._data['cpu']['times_total'], self._old_data['cpu']['times_total'])
+			self._data['cpu']['percent'] = []
+			for i in range(0, len(self._data['cpu']['times'])):
+				self._data['cpu']['percent'].append(getPercents(self._data['cpu']['times'][i], self._old_data['cpu']['times'][i]))
+
+	def getDisk(self):
+		self._data['disk'] = collections.OrderedDict()
+		#TODO register only the difference between current and old data
+		self._data['disk']['counters'] = self._toDict(psutil.disk_io_counters(perdisk=True))
+
+	def getFS(self):
+		self._data['fs'] = collections.OrderedDict()
+		self._data['fs']['mount'] = self._toDict(psutil.disk_partitions())
+
+		self._data['fs']['statvfs'] = collections.OrderedDict()
+		dev_paths = set([x['device'] for x in self._data['fs']['mount']])
+		for d in dev_paths:
+			for m in self._data['fs']['mount']:
+				if m['device'] == d:
+					self._data['fs']['statvfs'][d] = self._toDict(os.statvfs(m['mountpoint']))
+					break
+
+	def _toDict(self, data):
+		basetypes = (str, int, float, complex, bool)
+		if isinstance(data, basetypes):
+			return data
+
+		if isinstance(data, list):
+			ret = []
+			for v in data:
+				ret.append(self._toDict(v))
+			return ret
+
+		if isinstance(data, dict):
+			ret = collections.OrderedDict()
+			for k, v in data.items():
+				ret[k] = self._toDict(v)
+			return ret
+
+		d = dir(data)
+		if '_asdict' in d:
+			return data._asdict()
+
+		ret = collections.OrderedDict()
+		for key in d:
+			value = getattr(data, key)
+			if key[0] != '_' and isinstance (value, basetypes):
+				ret[key] = value
+		return ret
 
 	def counter(self): return self._counter
 
