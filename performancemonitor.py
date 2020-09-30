@@ -12,15 +12,16 @@ LICENSE file in the root directory) and Apache 2.0 License
 import config
 import util
 
+import argparse
 import time
 import asyncio
 import threading
-import argparse
 import signal
-import collections
 import psutil
-import json
 import os
+import datetime
+import collections
+import json
 
 #=============================================================================
 import logging
@@ -179,49 +180,72 @@ class CmdServer (threading.Thread):
 #=============================================================================
 class Stats:
 	_counter = None
+	_raw_data = None
 	_data = None
+	_old_raw_data = None
 	_old_data = None
 
 	def __init__(self, old):
 		if old is not None:
 			self._counter = old._counter+1
+			self._old_raw_data = old._raw_data
 			self._old_data = old._data
 		else:
 			self._counter = 0
 
+		self._raw_data = collections.OrderedDict()
 		self._data = collections.OrderedDict()
 
+		self.getTime()
 		self.getCPU()
 		self.getDisk()
 		self.getFS()
 
+	def getTime(self):
+		self._raw_data['time'] = datetime.datetime.now()
+		self._data['time_s'] = self._raw_data['time'].strftime('%s')
+		self._data['time_f'] = self._raw_data['time'].strftime('%Y-%m-%d %H:%M:%S')
+
 	def getCPU(self):
 		#idle_times = [ 'idle', 'iowait', 'steal' ]
-		def getPercents(new, old):
-			sum_total = sum(new.values()) - sum(old.values())
+		def getPercents(new):
+			sum_total = sum(new.values())
 			ret = collections.OrderedDict()
 			for k in new.keys():
-				ret[k] = 100. * ((new[k]-old[k])/sum_total)
+				ret[k] = 100. * (new[k]/sum_total)
 			return ret
 
 		self._data['cpu'] = collections.OrderedDict()
+		self._raw_data['cpu'] = collections.OrderedDict()
+
 		self._data['cpu']['cores'] = psutil.cpu_count(logical=False)
 		self._data['cpu']['threads'] = psutil.cpu_count(logical=True)
 		self._data['cpu']['count'] = self._data['cpu']['threads']
-		#TODO register only the difference between current and old data
-		self._data['cpu']['times_total'] = self._toDict(psutil.cpu_times())
-		self._data['cpu']['times'] = self._toDict(psutil.cpu_times(percpu=True))
+
+		self._raw_data['cpu']['times_total'] = self._toDict(psutil.cpu_times())
+		self._raw_data['cpu']['times'] = self._toDict(psutil.cpu_times(percpu=True))
 
 		if self._old_data is not None:
-			self._data['cpu']['percent_total'] = getPercents(self._data['cpu']['times_total'], self._old_data['cpu']['times_total'])
+			self._data['cpu']['times_total'] = self._getDiff(self._raw_data['cpu']['times_total'], self._old_raw_data['cpu']['times_total'])
+			self._data['cpu']['times'] = []
+			for i in range(0, len(self._raw_data['cpu']['times'])):
+				self._data['cpu']['times'].append(self._getDiff(self._raw_data['cpu']['times'][i], self._old_raw_data['cpu']['times'][i]))
+
+			self._data['cpu']['percent_total'] = getPercents(self._data['cpu']['times_total'])
 			self._data['cpu']['percent'] = []
 			for i in range(0, len(self._data['cpu']['times'])):
-				self._data['cpu']['percent'].append(getPercents(self._data['cpu']['times'][i], self._old_data['cpu']['times'][i]))
+				self._data['cpu']['percent'].append(getPercents(self._data['cpu']['times'][i]))
 
 	def getDisk(self):
+		self._raw_data['disk'] = collections.OrderedDict()
 		self._data['disk'] = collections.OrderedDict()
-		#TODO register only the difference between current and old data
-		self._data['disk']['counters'] = self._toDict(psutil.disk_io_counters(perdisk=True))
+		self._raw_data['disk']['counters'] = self._toDict(psutil.disk_io_counters(perdisk=True))
+		if self._old_data is not None:
+			self._data['disk']['counters'] = collections.OrderedDict()
+			for k, v in self._raw_data['disk']['counters'].items():
+				oldv = self._raw_data['disk']['counters'].get(k)
+				if oldv is not None:
+					self._data['disk']['counters'][k] = self._getDiff(v, oldv)
 
 	def getFS(self):
 		self._data['fs'] = collections.OrderedDict()
@@ -261,6 +285,12 @@ class Stats:
 			value = getattr(data, key)
 			if key[0] != '_' and isinstance (value, basetypes):
 				ret[key] = value
+		return ret
+
+	def _getDiff(self, new, old):
+		ret = collections.OrderedDict()
+		for k, v in new.items():
+			ret[k] = v - old[k]
 		return ret
 
 	def counter(self): return self._counter

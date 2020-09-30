@@ -34,11 +34,11 @@ class Program:
 			default=config.get_default_port(),
 			help='device')
 		parser.add_argument('-l', '--log_level', type=str,
-			default='INFO', choices=[ 'DEBUG', 'INFO' ],
+			default='INFO', choices=[ 'debug', 'DEBUG', 'info', 'INFO' ],
 			help='log level')
 		self.args = parser.parse_args()
 
-		log.setLevel(getattr(logging, self.args.log_level))
+		log.setLevel(getattr(logging, self.args.log_level.upper()))
 		log.debug('Parameters: {}'.format(str(self.args)))
 
 	def main(self):
@@ -71,8 +71,10 @@ class Program:
 			await asyncio.sleep(0.3)
 
 	async def send_message(self, message):
+		log.debug('Initiating connection...')
 		reader, writer = await asyncio.open_connection(
 			'127.0.0.1', self.args.port )
+		log.debug('connection established')
 
 		while not self._stop:
 			log.debug(f'Send: {message!r}')
