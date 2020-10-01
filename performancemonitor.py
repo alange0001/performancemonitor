@@ -117,12 +117,12 @@ class Program:
 					log.debug("Sending stats...")
 					handlerObj.request.sendall(write_message)
 
-				elif message == 'stop':
-					log.info(f"{cur_thread.name}: command stop received")
+				elif message == 'stop' or message == 'close':
+					log.info(f"{cur_thread.name}: command {message} received")
 					handlerObj.request.sendall(bytes('OK, stopping', 'utf-8'))
 					break
 				else:
-					raise Exception(f"invalid command {message}")
+					raise Exception(f"invalid command: {message}")
 		except Exception as e:
 			log.error(f"{cur_thread.name}: Exception received: {str(e)}")
 
@@ -185,8 +185,8 @@ class Stats:
 
 	def getTime(self):
 		self._raw_data['time'] = datetime.datetime.now()
-		self._data['time_s'] = self._raw_data['time'].strftime('%s')
-		self._data['time_f'] = self._raw_data['time'].strftime('%Y-%m-%d %H:%M:%S')
+		self._data['system_time'] = self._raw_data['time'].strftime('%Y-%m-%d %H:%M:%S')
+		self._data['system_time_s'] = int(self._raw_data['time'].strftime('%s'))
 
 	def getCPU(self):
 		#idle_times = [ 'idle', 'iowait', 'steal' ]
