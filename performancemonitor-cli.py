@@ -74,7 +74,7 @@ class Program:
 	def signal_handler(self, signame, signumber, stack):
 		log.warning("signal {} received".format(signame))
 		self.stop()
-		exit(1)
+		exit(0)
 
 #=============================================================================
 if __name__ == '__main__':

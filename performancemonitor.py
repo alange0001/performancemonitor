@@ -60,7 +60,7 @@ class Program:
 		try:
 			log.info("Program initiated")
 			for i in ('SIGINT', 'SIGTERM'):
-				signal.signal(getattr(signal, i),  lambda signumber, stack, signame=i: self.signal_handler(signame,  signumber, stack) )
+				signal.signal(getattr(signal, i),  lambda signumber, stack, signame=i: self.signalHandler(signame,  signumber, stack) )
 
 			self._cmd_thread = CmdServer(self)
 
@@ -83,7 +83,7 @@ class Program:
 		if self._cmd_thread is not None:
 			self._cmd_thread.stop()
 
-	def signal_handler(self, signame, signumber, stack):
+	def signalHandler(self, signame, signumber, stack):
 		log.warning("signal {} received".format(signame))
 		self.stop()
 
@@ -95,71 +95,69 @@ class Program:
 		s = self._current_stats
 		return s
 
+	def clientHandler(self, handlerObj): #called by CmdServer.ThreadedTCPRequestHandler
+		cur_thread = threading.current_thread()
+		log.info(f"{cur_thread.name}: Client handler initiated")
+		try:
+			old_stats = self.currentStats()
+			while True:
+				message = str(handlerObj.request.recv(1024), 'utf-8')
+				log.debug(f"{cur_thread.name}: message \"{message}\" received")
+				if message == 'stats':
+					cur_stats = old_stats
+					while not self._stop and cur_stats.counter() == old_stats.counter():
+						time.sleep(0.3)
+						cur_stats = self.currentStats()
+					if self._stop:
+						break
+
+					write_message = bytes(str(cur_stats), 'utf-8')
+					old_stats = cur_stats
+
+					log.debug("Sending stats...")
+					handlerObj.request.sendall(write_message)
+
+				elif message == 'stop':
+					log.info(f"{cur_thread.name}: command stop received")
+					handlerObj.request.sendall(bytes('OK, stopping', 'utf-8'))
+					break
+				else:
+					raise Exception(f"invalid command {message}")
+		except Exception as e:
+			log.error(f"{cur_thread.name}: Exception received: {str(e)}")
+
+		log.info(f"{cur_thread.name}: Connection closed")
+
 #=============================================================================
 class CmdServer:
-	_program       = None
 	_stop          = False
 	_server        = None
 	_server_thread = None
 
 	def __init__(self, program):
-		self._program = program
-		self.ThreadedTCPRequestHandler._parent = self
 		self.ThreadedTCPRequestHandler._program = program
 
-		host_port = ('localhost', self._program.args.port)
+		host_port = ('localhost', program.args.port)
 		self._server = self.ThreadedTCPServer(host_port, self.ThreadedTCPRequestHandler)
 		self._server_thread = threading.Thread(target=self._server.serve_forever)
 		self._server_thread.daemon = True
-		log.info(f'Starting thread CmdServer {host_port}')
+		log.info(f'Starting {self.__class__.__name__} {host_port}')
 		self._server_thread.start()
-		log.debug('CmdServer started')
+		log.debug(f'{self.__class__.__name__} started')
 
 	def stop(self):
 		if not self._stop:
-			log.info('Stopping thread CmdServer')
+			log.info(f'Stopping {self.__class__.__name__}')
 			self._stop = True
 			self._server.shutdown()
 
+	# https://docs.python.org/3/library/socketserver.html
 	class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 		pass
-
 	class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
-		# https://docs.python.org/3/library/socketserver.html
-		_parent = None
 		_program = None
 		def handle(self):
-			cur_thread = threading.current_thread()
-			log.info(f"{cur_thread.name}: Connection handler initiated")
-			try:
-				old_stats = self._program.currentStats()
-				while True:
-					message = str(self.request.recv(1024), 'utf-8')
-					log.debug(f"{cur_thread.name}: message \"{message}\" received")
-					if message == 'stats':
-						cur_stats = old_stats
-						while not self._parent._stop and cur_stats.counter() == old_stats.counter():
-							time.sleep(0.3)
-							cur_stats = self._program.currentStats()
-						if self._parent._stop:
-							break
-
-						write_message = bytes(str(cur_stats), 'utf-8')
-						old_stats = cur_stats
-
-						log.debug(f"Sending stats...")
-						self.request.sendall(write_message)
-
-					elif message == 'stop':
-						log.info(f"{cur_thread.name}: command stop received")
-						self.request.sendall(bytes('OK, stopping', 'utf-8'))
-						break
-					else:
-						raise Exception(f"invalid command {message}")
-			except Exception as e:
-				log.error(f"{cur_thread.name}: Exception received: {str(e)}")
-
-			log.info(f"{cur_thread.name}: Connection closed")
+			self._program.clientHandler(self)
 
 #=============================================================================
 class Stats:
