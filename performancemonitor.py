@@ -13,10 +13,11 @@ import config
 import util
 
 import argparse
-import time
-import asyncio
-import threading
 import signal
+import threading
+import socket
+import socketserver
+import time
 import psutil
 import os
 import datetime
@@ -33,13 +34,12 @@ log.setLevel(logging.INFO)
 #=============================================================================
 class Program:
 	_stop = False
-	_threads = None
+	_cmd_thread = None
 	_current_stats = None
 
 	args = None
 
 	def __init__(self):
-		self._threads = []
 		self.parse_args()
 
 	def parse_args(self):
@@ -62,7 +62,7 @@ class Program:
 			for i in ('SIGINT', 'SIGTERM'):
 				signal.signal(getattr(signal, i),  lambda signumber, stack, signame=i: self.signal_handler(signame,  signumber, stack) )
 
-			self.startThread( CmdServer(self) )
+			self._cmd_thread = CmdServer(self)
 
 			self.collectStats()
 			while not self._stop:
@@ -77,17 +77,11 @@ class Program:
 		self.stop()
 		return 0
 
-	def startThread(self, thread):
-		thread.start()
-		self._threads.append(thread)
-
 	def stop(self):
 		if self._stop: return
 		self._stop = True
-		for t in self._threads:
-			t.stop()
-		for t in self._threads:
-			t.join()
+		if self._cmd_thread is not None:
+			self._cmd_thread.stop()
 
 	def signal_handler(self, signame, signumber, stack):
 		log.warning("signal {} received".format(signame))
@@ -102,80 +96,70 @@ class Program:
 		return s
 
 #=============================================================================
-class CmdServer (threading.Thread):
-	_program = None
-	_stop_thread = False
+class CmdServer:
+	_program       = None
+	_stop          = False
+	_server        = None
+	_server_thread = None
 
 	def __init__(self, program):
 		self._program = program
-		threading.Thread.__init__(self)
-		self.name = 'CmdServer'
+		self.ThreadedTCPRequestHandler._parent = self
+		self.ThreadedTCPRequestHandler._program = program
 
-	def run(self):
-		asyncio.run( self.main() )
+		host_port = ('localhost', self._program.args.port)
+		self._server = self.ThreadedTCPServer(host_port, self.ThreadedTCPRequestHandler)
+		self._server_thread = threading.Thread(target=self._server.serve_forever)
+		self._server_thread.daemon = True
+		log.info(f'Starting thread CmdServer {host_port}')
+		self._server_thread.start()
+		log.debug('CmdServer started')
 
 	def stop(self):
-		log.debug('stopping thread CmdServer')
-		self._stop_thread = True
+		if not self._stop:
+			log.info('Stopping thread CmdServer')
+			self._stop = True
+			self._server.shutdown()
 
-	async def main(self):
-		task = asyncio.create_task( self.server() )
-		while not self._stop_thread:
-			await asyncio.sleep(0.3)
-		task.cancel()
-		log.debug('thread CmdServer stopped')
+	class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+		pass
 
-	async def server(self):
-		self._loop = asyncio.get_event_loop()
+	class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
+		# https://docs.python.org/3/library/socketserver.html
+		_parent = None
+		_program = None
+		def handle(self):
+			cur_thread = threading.current_thread()
+			log.info(f"{cur_thread.name}: Connection handler initiated")
+			try:
+				old_stats = self._program.currentStats()
+				while True:
+					message = str(self.request.recv(1024), 'utf-8')
+					log.debug(f"{cur_thread.name}: message \"{message}\" received")
+					if message == 'stats':
+						cur_stats = old_stats
+						while not self._parent._stop and cur_stats.counter() == old_stats.counter():
+							time.sleep(0.3)
+							cur_stats = self._program.currentStats()
+						if self._parent._stop:
+							break
 
-		handler = lambda reader, writer: self.handler(reader, writer)
-		self._server = await asyncio.start_server(
-			handler, '127.0.0.1', self._program.args.port )
+						write_message = bytes(str(cur_stats), 'utf-8')
+						old_stats = cur_stats
 
-		addr = self._server.sockets[0].getsockname()
-		log.info(f'Serving on {addr}')
+						log.debug(f"Sending stats...")
+						self.request.sendall(write_message)
 
-		async with self._server:
-			await self._server.serve_forever()
-
-	async def handler(self, reader, writer):
-		log.debug("Starting handler...")
-		try:
-			addr = writer.get_extra_info('peername')
-
-			old_stats = self._program.currentStats()
-
-			while not self._stop_thread:
-				data = await reader.read(255)
-				message = data.decode()
-				log.debug(f"Received {message!r} from {addr!r}")
-
-				if message == 'stats':
-					cur_stats = old_stats
-					while not self._stop_thread and cur_stats.counter() == old_stats.counter():
-						await asyncio.sleep(0.3)
-						cur_stats = self._program.currentStats()
-					if self._stop_thread:
+					elif message == 'stop':
+						log.info(f"{cur_thread.name}: command stop received")
+						self.request.sendall(bytes('OK, stopping', 'utf-8'))
 						break
+					else:
+						raise Exception(f"invalid command {message}")
+			except Exception as e:
+				log.error(f"{cur_thread.name}: Exception received: {str(e)}")
 
-					write_message = str(cur_stats)
-					old_stats = cur_stats
-					log.debug(f"Send: {write_message!r}")
-					writer.write(write_message.encode())
-					await writer.drain()
-				elif message == 'stop':
-					writer.write('OK, stopping'.encode())
-					await writer.drain()
-					break
-				else:
-					writer.write('unknown command'.encode())
-					await writer.drain()
-					break
-		except Exception as e:
-			log.error('Exception received in CmdServer.handler: {}'.format(str(e)))
-
-		log.debug("Close the connection")
-		writer.close()
+			log.info(f"{cur_thread.name}: Connection closed")
 
 #=============================================================================
 class Stats:

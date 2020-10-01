@@ -12,9 +12,9 @@ LICENSE file in the root directory) and Apache 2.0 License
 import config
 import util
 
-import asyncio
 import argparse
 import signal
+import socket
 
 #=============================================================================
 import logging
@@ -25,6 +25,7 @@ log.setLevel(logging.INFO)
 #=============================================================================
 class Program:
 	_stop = False
+	_sock = None
 	args = None
 
 	def parse_args(self):
@@ -48,48 +49,32 @@ class Program:
 			signal.signal(getattr(signal, i),  lambda signumber, stack, signame=i: self.signal_handler(signame,  signumber, stack) )
 
 		try:
-			send_message = lambda message: self.send_message(message)
-			asyncio.run(self.client_main('stats'))
+			self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+			self._sock.connect(('localhost', self.args.port))
+			while not self._stop:
+				self._sock.sendall(bytes('stats', 'utf-8'))
+				response = str(self._sock.recv(1024 * 1024), 'utf-8')
+				log.info(response)
 
 		except Exception as e:
 			log.error('exception received: {}'.format(str(e)))
+			self.stop()
 			return 1
 
+		self.stop()
 		return 0
 
 	def stop(self):
 		if self._stop: return
 		self._stop = True
+		if self._sock is not None:
+			self._sock.close()
+			self._sock = None
 
 	def signal_handler(self, signame, signumber, stack):
 		log.warning("signal {} received".format(signame))
 		self.stop()
-
-	async def client_main(self, message):
-		task = asyncio.create_task( self.send_message(message) )
-		while not self._stop:
-			await asyncio.sleep(0.3)
-
-	async def send_message(self, message):
-		log.debug('Initiating connection...')
-		reader, writer = await asyncio.open_connection(
-			'127.0.0.1', self.args.port )
-		log.debug('connection established')
-
-		while not self._stop:
-			log.debug(f'Send: {message!r}')
-			writer.write(message.encode())
-			await writer.drain()
-
-			data = await reader.read(1024 * 1024)
-			log.info(data.decode())
-
-		log.debug(f'Send: close')
-		writer.write('stop'.encode())
-		await writer.drain()
-		log.debug('Close the connection')
-		writer.close()
-		await writer.wait_closed()
+		exit(1)
 
 #=============================================================================
 if __name__ == '__main__':
