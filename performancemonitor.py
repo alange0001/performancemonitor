@@ -19,21 +19,26 @@ import socket
 import socketserver
 import time
 import psutil
+import sys
 import os
+import subprocess
+import shlex
 import datetime
 import collections
 import json
+import re
+import traceback
 
 #=============================================================================
 import logging
 from systemd.journal import JournalHandler
 log = logging.getLogger('performancemonitor')
-log.addHandler(JournalHandler())
 log.setLevel(logging.INFO)
 
 #=============================================================================
 class Program:
 	_stop = False
+	_iostat_thread = None
 	_cmd_thread = None
 	_current_stats = None
 
@@ -48,47 +53,81 @@ class Program:
 		parser.add_argument('-p', '--port', type=int,
 			default=config.get_default_port(),
 			help='device')
+		parser.add_argument('-i', '--interval', type=int,
+			default=5,
+			help='stats interval')
+		parser.add_argument('-d', '--device', type=str,
+			default='',
+			help='disk device name')
+		parser.add_argument('-o', '--log_handler', type=str,
+			default='stderr', choices=[ 'journal', 'stderr' ],
+			help='log handler')
 		parser.add_argument('-l', '--log_level', type=str,
 			default='INFO', choices=[ 'debug', 'DEBUG', 'info', 'INFO' ],
 			help='log level')
 		self.args = parser.parse_args()
 
+		if self.args.interval < 1:
+			raise Exception(f'parameter error: invalid interval: {self.args.interval}')
+		self.args.device = self.args.device.split('/')[-1]
+		if self.args.device == '':
+			raise Exception(f'parameter error: invalid disk device name: "{self.args.device}"')
+
+		if self.args.log_handler == 'journal':
+			log_h = JournalHandler()
+			log_h.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+		else:
+			log_h = logging.StreamHandler()
+			log_h.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s: %(message)s'))
+		log.addHandler(log_h)
+
 		log.setLevel(getattr(logging, self.args.log_level.upper()))
 		log.info('Parameters: {}'.format(str(self.args)))
 
 	def main(self):
+		ret = 0
+
 		try:
 			log.info("Program initiated")
 			for i in ('SIGINT', 'SIGTERM'):
 				signal.signal(getattr(signal, i),  lambda signumber, stack, signame=i: self.signalHandler(signame,  signumber, stack) )
 
+			self._iostat_thread = IOstat(self.args.device, self.args.interval)
+			self._iostat_thread.start()
+
 			self._cmd_thread = CmdServer(self)
 
 			self.collectStats()
 			while not self._stop:
-				time.sleep(5)
+				time.sleep(self.args.interval)
 				self.collectStats()
 
 		except Exception as e:
-			log.critical("exception received: {}".format(str(e)))
-			self.stop()
-			return 1
+			if log.level == logging.DEBUG:
+				exc_type, exc_value, exc_traceback = sys.exc_info()
+				log.critical('exception received:\n' + ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
+			else:
+				log.critical("exception received: {}".format(str(e)))
+			ret = 1
 
 		self.stop()
-		return 0
+		return ret
 
 	def stop(self):
 		if self._stop: return
 		self._stop = True
 		if self._cmd_thread is not None:
 			self._cmd_thread.stop()
+		if self._iostat_thread is not None:
+			self._iostat_thread.stop()
+			self._iostat_thread.join()
 
 	def signalHandler(self, signame, signumber, stack):
 		log.warning("signal {} received".format(signame))
 		self.stop()
 
 	def collectStats(self):
-		s = Stats(self._current_stats)
+		s = Stats(self._current_stats, self.args.device, self._iostat_thread)
 		self._current_stats = s
 
 	def currentStats(self):
@@ -166,14 +205,19 @@ class Stats:
 	_data = None
 	_old_raw_data = None
 	_old_data = None
+	_disk_device = None
+	_iostat = None
 
-	def __init__(self, old):
+	def __init__(self, old, disk_device, iostat):
 		if old is not None:
 			self._counter = old._counter+1
 			self._old_raw_data = old._raw_data
 			self._old_data = old._data
+			self._disk_device=disk_device
 		else:
 			self._counter = 0
+
+		self._iostat = iostat
 
 		self._raw_data = collections.OrderedDict()
 		self._data = collections.OrderedDict()
@@ -225,21 +269,34 @@ class Stats:
 		if self._old_data is not None:
 			self._data['disk']['counters'] = collections.OrderedDict()
 			for k, v in self._raw_data['disk']['counters'].items():
-				oldv = self._raw_data['disk']['counters'].get(k)
-				if oldv is not None:
-					self._data['disk']['counters'][k] = self._getDiff(v, oldv)
+				if k == self._disk_device or k == f'/dev/{self._disk_device}':
+					oldv = self._old_raw_data['disk']['counters'].get(k)
+					if oldv is not None:
+						self._data['disk']['counters'][k] = self._getDiff(v, oldv)
+
+		iostat = self._iostat.getStats()
+		if iostat is not None:
+			self._data['disk']['iostat'] = iostat
+		else:
+			log.warning('iostat has no data')
 
 	def getFS(self):
+		dev_re = f'(/dev/){{0,1}}{self._disk_device}[0-9]+'
 		self._data['fs'] = collections.OrderedDict()
-		self._data['fs']['mount'] = self._toDict(psutil.disk_partitions())
+		self._data['fs']['mount'] = []
+		aux = self._toDict(psutil.disk_partitions())
+		for m in aux:
+			if len( re.findall(dev_re, m['device']) ) > 0:
+				self._data['fs']['mount'].append(m)
 
 		self._data['fs']['statvfs'] = collections.OrderedDict()
 		dev_paths = set([x['device'] for x in self._data['fs']['mount']])
 		for d in dev_paths:
-			for m in self._data['fs']['mount']:
-				if m['device'] == d:
-					self._data['fs']['statvfs'][d] = self._toDict(os.statvfs(m['mountpoint']))
-					break
+			if len( re.findall(dev_re, d) ) > 0:
+				for m in self._data['fs']['mount']:
+					if m['device'] == d:
+						self._data['fs']['statvfs'][d] = self._toDict(os.statvfs(m['mountpoint']))
+						break
 
 	def _toDict(self, data):
 		basetypes = (str, int, float, complex, bool)
@@ -280,8 +337,73 @@ class Stats:
 	def __str__(self):
 		return 'STATS: {}'.format(json.dumps(self._data))
 
+class IOstat (threading.Thread):
+	_device = None
+	_interval = None
+	_stop_ = False
+	_exception = None
+	_proc = None
+	_stats = None
+	def __init__(self, device, interval):
+		threading.Thread.__init__(self)
+		self.name = 'iostat'
+		self._device = device
+		self._interval = interval
+
+	def run(self):
+		log.info('Starting subprocess iostat...')
+		cmd = shlex.split(f'iostat -xky -o JSON {self._interval} {self._device}')
+
+		try:
+			with subprocess.Popen(
+				cmd, stdout=subprocess.PIPE, shell=False,
+				stderr=subprocess.STDOUT) as proc:
+				self._proc = proc
+
+				for l in iter(proc.stdout.readline, b''):
+					s = l.decode('utf-8')
+					r = re.findall(r'(\{"disk_device"[^}]+\})', s)
+					if len(r) > 0:
+						j = json.loads(r[0])
+						self._stats = j
+						log.debug('iostat: ' + str(j))
+					if self._stop_: break
+		except Exception as e:
+			self._exception = e
+
+		self._proc = None
+
+	def stop(self):
+		log.info('Stopping IOstat')
+		if self._stop_: return
+		self._stop_ = True
+		if self._proc is not None:
+			self._proc.kill()
+			self._proc = None
+
+	def check(self):
+		if self._exception is not None:
+			raise self._exception
+		if self._proc is None:
+			raise Exception('iostat is not running')
+
+	def getStats(self):
+		if not self._stop_:
+			self.check()
+		return self._stats
+
 #=============================================================================
 if __name__ == '__main__':
-	r = Program().main()
-	log.info('exit {}'.format(r))
+	try:
+		r = Program().main()
+		log.info('exit {}'.format(r))
+
+	except Exception as e:
+		if log.level == logging.DEBUG:
+			exc_type, exc_value, exc_traceback = sys.exc_info()
+			sys.stderr.write('main exception:\n' + ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback)) + '\n')
+		else:
+			sys.stderr.write('main exception: ' + str(e) + '\n')
+		exit(1)
+
 	exit(r)
