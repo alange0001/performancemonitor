@@ -460,7 +460,7 @@ class Containers:
 	_container_names = None
 	_container_ids   = None
 	def __init__(self):
-		cmd = "docker ps -a --format '{{json . }}'"
+		cmd = "docker ps --format '{{json . }}'"
 		exitcode, output = subprocess.getstatusoutput(cmd)
 		if exitcode != 0:
 			raise Exception(f'docker returned error {exitcode}')
