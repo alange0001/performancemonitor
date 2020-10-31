@@ -100,7 +100,7 @@ class Program:
 			for i in ('SIGINT', 'SIGTERM'):
 				signal.signal(getattr(signal, i),  lambda signumber, stack, signame=i: self.signalHandler(signame,  signumber, stack) )
 
-			self._iostat_thread = IOstat(args.device, args.interval)
+			self._iostat_thread = IOstat()
 			self._iostat_thread.start()
 
 			self._cmd_thread = CmdServer(self)
@@ -519,7 +519,7 @@ class Test:
 		io = IOstat()
 		io.start()
 		s = Stats(None, io)
-		for i in range(0,2):
+		for i in range(0,4):
 			time.sleep(args.interval)
 			s = Stats(s, io)
 			log.debug(str(s))
