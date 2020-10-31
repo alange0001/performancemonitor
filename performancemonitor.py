@@ -36,70 +36,78 @@ log = logging.getLogger('performancemonitor')
 log.setLevel(logging.INFO)
 
 #=============================================================================
+args = None
+
+class Args:
+	_args = None
+	def __init__(self):
+		if self.__class__._args is None:
+			parser = argparse.ArgumentParser(
+				description="Performance monitor server.")
+			parser.add_argument('-p', '--port', type=int,
+				default=config.get_default_port(),
+				help='device')
+			parser.add_argument('-i', '--interval', type=int,
+				default=5,
+				help='stats interval')
+			parser.add_argument('-d', '--device', type=str,
+				default='sda',
+				help='disk device name')
+			parser.add_argument('-o', '--log_handler', type=str,
+				default='stderr', choices=[ 'journal', 'stderr' ],
+				help='log handler')
+			parser.add_argument('-l', '--log_level', type=str,
+				default='INFO', choices=[ 'debug', 'DEBUG', 'info', 'INFO' ],
+				help='log level')
+			parser.add_argument('-t', '--test', type=str,
+				default='',
+				help='test routines')
+			args = parser.parse_args()
+			self.__class__._args = args
+
+			if args.interval < 1:
+				raise Exception(f'parameter error: invalid interval: {args.interval}')
+			args.device = args.device.split('/')[-1]
+			if args.device == '':
+				raise Exception(f'parameter error: invalid disk device name: "{args.device}"')
+
+			if args.log_handler == 'journal':
+				log_h = JournalHandler()
+				log_h.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+			else:
+				log_h = logging.StreamHandler()
+				log_h.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s: %(message)s'))
+			log.addHandler(log_h)
+
+			log.setLevel(getattr(logging, args.log_level.upper()))
+			log.info('Parameters: {}'.format(str(self.__class__._args)))
+
+	def __getattr__(self, name):
+		if name[0] != '_':
+			return getattr(self.__class__._args, name)
+
+#=============================================================================
 class Program:
 	_stop = False
 	_iostat_thread = None
 	_cmd_thread = None
 	_current_stats = None
 
-	args = None
-
-	def __init__(self):
-		self.parse_args()
-
-	def parse_args(self):
-		parser = argparse.ArgumentParser(
-			description="Performance monitor server.")
-		parser.add_argument('-p', '--port', type=int,
-			default=config.get_default_port(),
-			help='device')
-		parser.add_argument('-i', '--interval', type=int,
-			default=5,
-			help='stats interval')
-		parser.add_argument('-d', '--device', type=str,
-			default='',
-			help='disk device name')
-		parser.add_argument('-o', '--log_handler', type=str,
-			default='stderr', choices=[ 'journal', 'stderr' ],
-			help='log handler')
-		parser.add_argument('-l', '--log_level', type=str,
-			default='INFO', choices=[ 'debug', 'DEBUG', 'info', 'INFO' ],
-			help='log level')
-		self.args = parser.parse_args()
-
-		if self.args.interval < 1:
-			raise Exception(f'parameter error: invalid interval: {self.args.interval}')
-		self.args.device = self.args.device.split('/')[-1]
-		if self.args.device == '':
-			raise Exception(f'parameter error: invalid disk device name: "{self.args.device}"')
-
-		if self.args.log_handler == 'journal':
-			log_h = JournalHandler()
-			log_h.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
-		else:
-			log_h = logging.StreamHandler()
-			log_h.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s: %(message)s'))
-		log.addHandler(log_h)
-
-		log.setLevel(getattr(logging, self.args.log_level.upper()))
-		log.info('Parameters: {}'.format(str(self.args)))
-
 	def main(self):
 		ret = 0
-
 		try:
 			log.info("Program initiated")
 			for i in ('SIGINT', 'SIGTERM'):
 				signal.signal(getattr(signal, i),  lambda signumber, stack, signame=i: self.signalHandler(signame,  signumber, stack) )
 
-			self._iostat_thread = IOstat(self.args.device, self.args.interval)
+			self._iostat_thread = IOstat(args.device, args.interval)
 			self._iostat_thread.start()
 
 			self._cmd_thread = CmdServer(self)
 
 			self.collectStats()
 			while not self._stop:
-				time.sleep(self.args.interval)
+				time.sleep(args.interval)
 				self.collectStats()
 
 		except Exception as e:
@@ -127,7 +135,7 @@ class Program:
 		self.stop()
 
 	def collectStats(self):
-		s = Stats(self._current_stats, self.args.device, self._iostat_thread)
+		s = Stats(self._current_stats, self._iostat_thread)
 		self._current_stats = s
 
 	def currentStats(self):
@@ -176,7 +184,7 @@ class CmdServer:
 	def __init__(self, program):
 		self.ThreadedTCPRequestHandler._program = program
 
-		host_port = ('localhost', program.args.port)
+		host_port = ('localhost', args.port)
 		self._server = self.ThreadedTCPServer(host_port, self.ThreadedTCPRequestHandler)
 		self._server_thread = threading.Thread(target=self._server.serve_forever)
 		self._server_thread.daemon = True
@@ -200,6 +208,7 @@ class CmdServer:
 
 #=============================================================================
 class Stats:
+	_delta_t = None
 	_counter = None
 	_raw_data = None
 	_data = None
@@ -208,12 +217,12 @@ class Stats:
 	_disk_device = None
 	_iostat = None
 
-	def __init__(self, old, disk_device, iostat):
+	def __init__(self, old, iostat):
 		if old is not None:
 			self._counter = old._counter+1
 			self._old_raw_data = old._raw_data
 			self._old_data = old._data
-			self._disk_device=disk_device
+			self._disk_device = args.device
 		else:
 			self._counter = 0
 
@@ -226,11 +235,16 @@ class Stats:
 		self.getCPU()
 		self.getDisk()
 		self.getFS()
+		self.getContainers()
 
 	def getTime(self):
-		self._raw_data['time'] = datetime.datetime.now()
-		self._data['system_time'] = self._raw_data['time'].strftime('%Y-%m-%d %H:%M:%S')
-		self._data['system_time_s'] = int(self._raw_data['time'].strftime('%s'))
+		t = datetime.datetime.now()
+		self._raw_data['time'] = t
+		self._data['system_time'] = t.strftime('%Y-%m-%d %H:%M:%S')
+		self._data['system_time_s'] = int(t.strftime('%s'))
+
+		if self._old_raw_data is not None:
+			self._delta_t = (t - self._old_raw_data['time']).total_seconds()
 
 	def getCPU(self):
 		#idle_times = [ 'idle', 'iowait', 'steal' ]
@@ -274,11 +288,11 @@ class Stats:
 					if oldv is not None:
 						self._data['disk']['counters'][k] = self._getDiff(v, oldv)
 
-		iostat = self._iostat.getStats()
-		if iostat is not None:
-			self._data['disk']['iostat'] = iostat
-		else:
-			log.warning('iostat has no data')
+			iostat = self._iostat.getStats()
+			if iostat is not None:
+				self._data['disk']['iostat'] = iostat
+			else:
+				log.warning('iostat has no data')
 
 	def getFS(self):
 		dev_re = f'(/dev/){{0,1}}{self._disk_device}[0-9]+'
@@ -297,6 +311,25 @@ class Stats:
 					if m['device'] == d:
 						self._data['fs']['statvfs'][d] = self._toDict(os.statvfs(m['mountpoint']))
 						break
+
+	def getContainers(self):
+		containers = Containers().raw_data()
+		self._raw_data['containers'] = containers
+		self._data['containers'] = {}
+		for name, data in containers.items():
+			i_data = { 'name': name,
+			           'id':   data['ID'], }
+			self._data['containers'][name] = i_data
+
+			if  self._old_raw_data is not None \
+			and self._old_raw_data.get('containers') is not None \
+			and self._old_raw_data['containers'].get(name) is not None:
+				old_data = self._old_raw_data['containers'][name]
+
+				for diff_name in ('blkio.service_bytes', 'blkio.serviced'):
+					i_data[f'{diff_name}/s'] = {}
+					for k, v in data[diff_name].items():
+						i_data[f'{diff_name}/s'][k] = (float(data[diff_name][k]) - float(old_data[diff_name][k])) / self._delta_t
 
 	def _toDict(self, data):
 		basetypes = (str, int, float, complex, bool)
@@ -337,28 +370,30 @@ class Stats:
 	def __str__(self):
 		return 'STATS: {}'.format(json.dumps(self._data))
 
+#=============================================================================
 class IOstat (threading.Thread):
 	_device = None
 	_interval = None
+	_started_ = False
 	_stop_ = False
 	_exception = None
 	_proc = None
 	_stats = None
-	def __init__(self, device, interval):
+	def __init__(self):
 		threading.Thread.__init__(self)
 		self.name = 'iostat'
-		self._device = device
-		self._interval = interval
+		self._device = args.device
+		self._interval = args.interval
 
 	def run(self):
 		log.info('Starting subprocess iostat...')
 		cmd = shlex.split(f'iostat -xky -o JSON {self._interval} {self._device}')
-
 		try:
 			with subprocess.Popen(
 				cmd, stdout=subprocess.PIPE, shell=False,
 				stderr=subprocess.STDOUT) as proc:
 				self._proc = proc
+				self._started_ = True
 
 				for l in iter(proc.stdout.readline, b''):
 					s = l.decode('utf-8')
@@ -384,7 +419,7 @@ class IOstat (threading.Thread):
 	def check(self):
 		if self._exception is not None:
 			raise self._exception
-		if self._proc is None:
+		if self._started_ and self._proc is None:
 			raise Exception('iostat is not running')
 
 	def getStats(self):
@@ -393,9 +428,131 @@ class IOstat (threading.Thread):
 		return self._stats
 
 #=============================================================================
+class Partitions:
+	data = None
+	data_major_minor = None
+	def __init__(self):
+		if self.__class__.data is None:
+			log.debug('Partitions: load partitions')
+			self.__class__.data = {}
+			self.__class__.data_major_minor = {}
+			with open('/proc/partitions', 'r') as fd:
+				lines = fd.readlines()
+				for l in lines:
+					r = re.findall(r'\s([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+(.+)', l)
+					if len(r) > 0:
+						d = { 'name':  r[0][3],
+						      'major': r[0][0],
+						      'minor': r[0][1],
+						      'blocks':r[0][2], }
+						self.__class__.data[d['name']] = d
+						self.__class__.data_major_minor[f"{d['major']}:{d['minor']}"] = d
+
+	def __getitem__(self, idx):
+		r = self.__class__.data.get(idx)
+		if r is not None: return r
+		r = self.__class__.data_major_minor[idx]
+		if r is not None: return r
+		raise Exception(f'partition "{idx}" not found')
+
+#=============================================================================
+class Containers:
+	_container_names = None
+	_container_ids   = None
+	def __init__(self):
+		cmd = "docker ps -a --format '{{json . }}'"
+		exitcode, output = subprocess.getstatusoutput(cmd)
+		if exitcode != 0:
+			raise Exception(f'docker returned error {exitcode}')
+
+		partition = Partitions()[args.device]
+		major_minor = f'{partition["major"]}:{partition["minor"]}'
+		log.debug(f'major_minor = {major_minor}')
+
+		self._container_names = {}
+		self._container_ids   = {}
+		for l in output.splitlines():
+			j = json.loads(l)
+			id = j['ID']
+			self._container_names[j['Names']] = j
+			self._container_ids[id] = j
+
+			j['blkio.service_bytes'] = self.get_blkio(major_minor, f'/sys/fs/cgroup/blkio/docker/{id}*/blkio.throttle.io_service_bytes')
+			j['blkio.serviced'] = self.get_blkio(major_minor, f'/sys/fs/cgroup/blkio/docker/{id}*/blkio.throttle.io_serviced')
+
+	def get_blkio(self, major_minor, filename):
+		ret = {}
+		cmd = f"cat {filename}"
+		exitcode, output = subprocess.getstatusoutput(cmd)
+		if exitcode != 0:
+			raise Exception(f'get_blkio command "{cmd}" returned error {exitcode}')
+		for l in output.splitlines():
+			r = re.findall(f'{major_minor} ([^ ]+) (.*)', l)
+			if len(r) > 0:
+				ret[r[0][0]] = r[0][1]
+		return ret
+
+	def names(self):
+		return self._container_names.keys()
+	def ids(self):
+		return self._container_ids.keys()
+	def raw_data(self):
+		return self._container_names
+	def __getitem__(self, idx):
+		r = self._container_names.get(idx)
+		if r is not None: return r
+		return self._container_ids[idx]
+
+#=============================================================================
+class Test:
+	def __init__(self, name):
+		f = getattr(self, name)
+		if f is None:
+			raise Exception(f'test named "{name}" does not exist')
+		f()
+
+	def args(self):
+		a = Args()
+		log.debug(a._args)
+
+	def stats(self):
+		io = IOstat()
+		io.start()
+		s = Stats(None, io)
+		for i in range(0,2):
+			time.sleep(args.interval)
+			s = Stats(s, io)
+			log.debug(str(s))
+		io.stop()
+
+	def iostat(self):
+		io = IOstat()
+		io.start()
+		for i in range(0,2):
+			time.sleep(args.interval)
+			log.debug(io.getStats())
+		io.stop()
+
+	def partitions(self):
+		p = Partitions()
+		log.debug(p.data)
+
+	def containers(self):
+		d = Containers()
+		log.debug(d.names())
+		log.debug(d.ids())
+		log.debug(d._container_names)
+
+#=============================================================================
 if __name__ == '__main__':
+	r = 0
 	try:
-		r = Program().main()
+		args = Args()
+		if args.test == '':
+			r = Program().main()
+		else:
+			Test(args.test)
+
 		log.info('exit {}'.format(r))
 
 	except Exception as e:
@@ -403,7 +560,7 @@ if __name__ == '__main__':
 			exc_type, exc_value, exc_traceback = sys.exc_info()
 			sys.stderr.write('main exception:\n' + ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback)) + '\n')
 		else:
-			sys.stderr.write('main exception: ' + str(e) + '\n')
+			sys.stderr.write(str(e) + '\n')
 		exit(1)
 
 	exit(r)
