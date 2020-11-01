@@ -327,9 +327,14 @@ class Stats:
 				old_data = self._old_raw_data['containers'][name]
 
 				for diff_name in ('blkio.service_bytes', 'blkio.serviced'):
+					if data.get(diff_name) is None or old_data.get(diff_name) is None:
+						continue
 					i_data[f'{diff_name}/s'] = {}
 					for k, v in data[diff_name].items():
 						i_data[f'{diff_name}/s'][k] = (float(data[diff_name][k]) - float(old_data[diff_name][k])) / self._delta_t
+					log.debug(f'container {name}, {diff_name}    : {data[diff_name]}')
+					log.debug(f'container {name}, {diff_name} old: {old_data[diff_name]}')
+					log.debug(f'container {name}, {diff_name}/s: {i_data[f"{diff_name}/s"]}')
 
 	def _toDict(self, data):
 		basetypes = (str, int, float, complex, bool)
@@ -477,15 +482,19 @@ class Containers:
 			self._container_names[j['Names']] = j
 			self._container_ids[id] = j
 
-			j['blkio.service_bytes'] = self.get_blkio(major_minor, f'/sys/fs/cgroup/blkio/docker/{id}*/blkio.throttle.io_service_bytes')
-			j['blkio.serviced'] = self.get_blkio(major_minor, f'/sys/fs/cgroup/blkio/docker/{id}*/blkio.throttle.io_serviced')
+			aux = self.get_blkio(major_minor, f'/sys/fs/cgroup/blkio/docker/{id}*/blkio.throttle.io_service_bytes')
+			if aux is not None: j['blkio.service_bytes'] = aux
+
+			aux = self.get_blkio(major_minor, f'/sys/fs/cgroup/blkio/docker/{id}*/blkio.throttle.io_serviced')
+			if aux is not None: j['blkio.serviced'] = aux
 
 	def get_blkio(self, major_minor, filename):
 		ret = {}
 		cmd = f"cat {filename}"
 		exitcode, output = subprocess.getstatusoutput(cmd)
 		if exitcode != 0:
-			raise Exception(f'get_blkio command "{cmd}" returned error {exitcode}')
+			log.error(f'get_blkio command "{cmd}" returned error {exitcode}')
+			return None
 		for l in output.splitlines():
 			r = re.findall(f'{major_minor} ([^ ]+) (.*)', l)
 			if len(r) > 0:
