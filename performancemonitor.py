@@ -232,6 +232,7 @@ class Stats:
 		self._data = collections.OrderedDict()
 
 		self.getTime()
+		self._data['arg_device'] = args.device
 		self.getCPU()
 		self.getDisk()
 		self.getFS()
