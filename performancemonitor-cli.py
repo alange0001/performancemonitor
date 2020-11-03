@@ -15,6 +15,7 @@ import util
 import argparse
 import signal
 import socket
+import time
 
 #=============================================================================
 import logging
@@ -55,6 +56,7 @@ class Program:
 				self._sock.sendall(bytes('stats', 'utf-8'))
 				response = str(self._sock.recv(1024 * 1024), 'utf-8')
 				log.info(response)
+				time.sleep(5)
 
 		except Exception as e:
 			log.error('exception received: {}'.format(str(e)))

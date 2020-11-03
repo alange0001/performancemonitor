@@ -36,62 +36,59 @@ log = logging.getLogger('performancemonitor')
 log.setLevel(logging.INFO)
 
 #=============================================================================
-args = None
+class ArgsWrapper: # single global instance "args"
+	def get_args(self):
+		parser = argparse.ArgumentParser(
+			description="Performance monitor server.")
+		parser.add_argument('-p', '--port', type=int,
+			default=config.get_default_port(),
+			help='device')
+		parser.add_argument('-i', '--interval', type=int,
+			default=5,
+			help='stats interval')
+		parser.add_argument('-d', '--device', type=str,
+			default='sda',
+			help='disk device name')
+		parser.add_argument('-o', '--log_handler', type=str,
+			default='stderr', choices=[ 'journal', 'stderr' ],
+			help='log handler')
+		parser.add_argument('-l', '--log_level', type=str,
+			default='INFO', choices=[ 'debug', 'DEBUG', 'info', 'INFO' ],
+			help='log level')
+		parser.add_argument('-t', '--test', type=str,
+			default='',
+			help='test routines')
+		args = parser.parse_args()
 
-class Args:
-	_args = None
-	def __init__(self):
-		if self.__class__._args is None:
-			parser = argparse.ArgumentParser(
-				description="Performance monitor server.")
-			parser.add_argument('-p', '--port', type=int,
-				default=config.get_default_port(),
-				help='device')
-			parser.add_argument('-i', '--interval', type=int,
-				default=5,
-				help='stats interval')
-			parser.add_argument('-d', '--device', type=str,
-				default='sda',
-				help='disk device name')
-			parser.add_argument('-o', '--log_handler', type=str,
-				default='stderr', choices=[ 'journal', 'stderr' ],
-				help='log handler')
-			parser.add_argument('-l', '--log_level', type=str,
-				default='INFO', choices=[ 'debug', 'DEBUG', 'info', 'INFO' ],
-				help='log level')
-			parser.add_argument('-t', '--test', type=str,
-				default='',
-				help='test routines')
-			args = parser.parse_args()
-			self.__class__._args = args
+		if args.interval < 1:
+			raise Exception(f'parameter error: invalid interval: {args.interval}')
+		args.device = args.device.split('/')[-1]
+		if args.device == '':
+			raise Exception(f'parameter error: invalid disk device name: "{args.device}"')
 
-			if args.interval < 1:
-				raise Exception(f'parameter error: invalid interval: {args.interval}')
-			args.device = args.device.split('/')[-1]
-			if args.device == '':
-				raise Exception(f'parameter error: invalid disk device name: "{args.device}"')
+		if args.log_handler == 'journal':
+			log_h = JournalHandler()
+			log_h.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+		else:
+			log_h = logging.StreamHandler()
+			log_h.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s: %(message)s'))
+		log.addHandler(log_h)
 
-			if args.log_handler == 'journal':
-				log_h = JournalHandler()
-				log_h.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
-			else:
-				log_h = logging.StreamHandler()
-				log_h.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s: %(message)s'))
-			log.addHandler(log_h)
-
-			log.setLevel(getattr(logging, args.log_level.upper()))
-			log.info('Parameters: {}'.format(str(self.__class__._args)))
+		log.setLevel(getattr(logging, args.log_level.upper()))
+		log.info('Parameters: {}'.format(str(args)))
+		return args
 
 	def __getattr__(self, name):
-		if name[0] != '_':
-			return getattr(self.__class__._args, name)
+		global args
+		args = self.get_args()
+		return getattr(args, name)
+
+args = ArgsWrapper()
 
 #=============================================================================
-class Program:
+class Program: # single instance
 	_stop = False
-	_iostat_thread = None
-	_cmd_thread = None
-	_current_stats = None
+	_st_list = None
 
 	def main(self):
 		ret = 0
@@ -100,15 +97,17 @@ class Program:
 			for i in ('SIGINT', 'SIGTERM'):
 				signal.signal(getattr(signal, i),  lambda signumber, stack, signame=i: self.signalHandler(signame,  signumber, stack) )
 
-			self._iostat_thread = IOstat()
-			self._iostat_thread.start()
+			self._st_list = []
 
-			self._cmd_thread = CmdServer(self)
-
+			iostat.getStats()
 			self.collectStats()
+			time.sleep(1)
+			
+			CmdServer.start(self)
+
 			while not self._stop:
-				time.sleep(args.interval)
 				self.collectStats()
+				time.sleep(1)
 
 		except Exception as e:
 			if log.level == logging.DEBUG:
@@ -122,64 +121,71 @@ class Program:
 		return ret
 
 	def stop(self):
-		if self._stop: return
-		self._stop = True
-		if self._cmd_thread is not None:
-			self._cmd_thread.stop()
-		if self._iostat_thread is not None:
-			self._iostat_thread.stop()
-			self._iostat_thread.join()
+		if not self._stop:
+			self._stop = True
+			CmdServer.stop()
+			iostat.stop()
 
 	def signalHandler(self, signame, signumber, stack):
 		log.warning("signal {} received".format(signame))
 		self.stop()
 
 	def collectStats(self):
-		s = Stats(self._current_stats, self._iostat_thread)
-		self._current_stats = s
+		st = Stats()
+		sl = self._st_list[:]
+		sl.append(st)
+		if len(sl) > args.interval:
+			del sl[0]
+		self._st_list = sl
 
 	def currentStats(self):
-		s = self._current_stats
-		return s
+		return self._st_list
 
-	def clientHandler(self, handlerObj): #called by CmdServer.ThreadedTCPRequestHandler
+	def clientHandler(self, handlerObj): # called by CmdServer.ThreadedTCPRequestHandler
 		cur_thread = threading.current_thread()
 		log.info(f"{cur_thread.name}: Client handler initiated")
 		try:
-			old_stats = self.currentStats()
 			while True:
 				message = str(handlerObj.request.recv(1024), 'utf-8')
 				log.debug(f"{cur_thread.name}: message \"{message}\" received")
-				if message == 'stats':
-					cur_stats = old_stats
-					while not self._stop and cur_stats.counter() == old_stats.counter():
-						time.sleep(0.3)
-						cur_stats = self.currentStats()
-					if self._stop:
-						break
 
-					write_message = bytes(str(cur_stats), 'utf-8')
-					old_stats = cur_stats
+				if self._stop:
+					break
+
+				if message == 'stats':
+					st_list = self.currentStats()
+					write_message = bytes(str(StatReport(st_list)), 'utf-8')
 
 					log.debug("Sending stats...")
 					handlerObj.request.sendall(write_message)
 
-				elif message == 'stop' or message == 'close':
+				elif message == 'stop' or message == 'close' or message == '':
 					log.info(f"{cur_thread.name}: command {message} received")
 					handlerObj.request.sendall(bytes('OK, stopping', 'utf-8'))
 					break
+
 				else:
 					raise Exception(f"invalid command: {message}")
+
 		except Exception as e:
-			log.error(f"{cur_thread.name}: Exception received: {str(e)}")
+			log.error(f"{cur_thread.name}: Exception received from clientHandler: {str(e)}")
 
 		log.info(f"{cur_thread.name}: Connection closed")
 
 #=============================================================================
-class CmdServer:
+class CmdServer: # single instance
+	_self_         = None
 	_stop          = False
 	_server        = None
 	_server_thread = None
+
+	# https://docs.python.org/3/library/socketserver.html
+	class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+		pass
+	class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
+		_program = None
+		def handle(self):
+			self._program.clientHandler(self)
 
 	def __init__(self, program):
 		self.ThreadedTCPRequestHandler._program = program
@@ -192,150 +198,101 @@ class CmdServer:
 		self._server_thread.start()
 		log.debug(f'{self.__class__.__name__} started')
 
-	def stop(self):
-		if not self._stop:
-			log.info(f'Stopping {self.__class__.__name__}')
+	@classmethod
+	def start(cls, program):
+		cls._self_ = CmdServer(program)
+
+	@classmethod
+	def stop(cls):
+		self = cls._self_
+		if self is not None and not self._stop:
+			cls._self_ = None
 			self._stop = True
+			log.info(f'Stopping {self.__class__.__name__}')
 			self._server.shutdown()
 
-	# https://docs.python.org/3/library/socketserver.html
-	class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
-		pass
-	class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
-		_program = None
-		def handle(self):
-			self._program.clientHandler(self)
-
 #=============================================================================
-class Stats:
+class StatReport:
 	_delta_t = None
-	_counter = None
-	_raw_data = None
 	_data = None
-	_old_raw_data = None
-	_old_data = None
-	_disk_device = None
-	_iostat = None
 
-	def __init__(self, old, iostat):
-		if old is not None:
-			self._counter = old._counter+1
-			self._old_raw_data = old._raw_data
-			self._old_data = old._data
-			self._disk_device = args.device
-		else:
-			self._counter = 0
-
-		self._iostat = iostat
-
-		self._raw_data = collections.OrderedDict()
+	def __init__(self, st_list):
 		self._data = collections.OrderedDict()
+		if st_list is not None and len(st_list) > 0:
+			st_new, st_old = st_list[-1], st_list[0]
 
-		self.getTime()
-		self._data['arg_device'] = args.device
-		self.getCPU()
-		self.getDisk()
-		self.getFS()
-		self.getContainers()
+			self._delta_t = (st_new._raw_data['time'] - st_old._raw_data['time']).total_seconds()
 
-	def getTime(self):
-		t = datetime.datetime.now()
-		self._raw_data['time'] = t
-		self._data['system_time'] = t.strftime('%Y-%m-%d %H:%M:%S')
-		self._data['system_time_s'] = int(t.strftime('%s'))
+			self._data['time_system']   = st_new._raw_data['time_system']
+			self._data['time_system_s'] = st_new._raw_data['time_system_s']
+			self._data['time_delta']    = self._delta_t
 
-		if self._old_raw_data is not None:
-			self._delta_t = (t - self._old_raw_data['time']).total_seconds()
+			self._data['arg_device'] = args.device
 
-	def getCPU(self):
-		#idle_times = [ 'idle', 'iowait', 'steal' ]
-		def getPercents(new):
-			sum_total = sum(new.values())
-			ret = collections.OrderedDict()
-			for k in new.keys():
-				ret[k] = 100. * (new[k]/sum_total)
-			return ret
+			self._data['cpu'] = collections.OrderedDict()
+			for k in ['cores', 'threads', 'count']:
+				self._data['cpu'][k]   = st_new._raw_data['cpu'][k]
+			for k in ['times_total', 'times']:
+				self._data['cpu'][k] = self._toDict(st_new._raw_data['cpu'][k])
 
-		self._data['cpu'] = collections.OrderedDict()
-		self._raw_data['cpu'] = collections.OrderedDict()
+			if len(st_list) > 1:
+				self._data['cpu']['percent_total'] = self._getPercent(
+						st_new._raw_data['cpu']['times_total']._asdict(),
+						st_old._raw_data['cpu']['times_total']._asdict())
 
-		self._data['cpu']['cores'] = psutil.cpu_count(logical=False)
-		self._data['cpu']['threads'] = psutil.cpu_count(logical=True)
-		self._data['cpu']['count'] = self._data['cpu']['threads']
+				self._data['cpu']['percent'] = []
+				for i in range(0, len(st_new._raw_data['cpu']['times'])):
+					self._data['cpu']['times'].append( self._getPercent(
+							st_new._raw_data['cpu']['times'][i]._asdict(),
+							st_old._raw_data['cpu']['times'][i]._asdict()) )
 
-		self._raw_data['cpu']['times_total'] = self._toDict(psutil.cpu_times())
-		self._raw_data['cpu']['times'] = self._toDict(psutil.cpu_times(percpu=True))
+			self._data['cpu']['idle_time_names'] = [ 'idle', 'iowait', 'steal' ]
 
-		if self._old_data is not None:
-			self._data['cpu']['times_total'] = self._getDiff(self._raw_data['cpu']['times_total'], self._old_raw_data['cpu']['times_total'])
-			self._data['cpu']['times'] = []
-			for i in range(0, len(self._raw_data['cpu']['times'])):
-				self._data['cpu']['times'].append(self._getDiff(self._raw_data['cpu']['times'][i], self._old_raw_data['cpu']['times'][i]))
-
-			self._data['cpu']['percent_total'] = getPercents(self._data['cpu']['times_total'])
-			self._data['cpu']['percent'] = []
-			for i in range(0, len(self._data['cpu']['times'])):
-				self._data['cpu']['percent'].append(getPercents(self._data['cpu']['times'][i]))
-
-	def getDisk(self):
-		self._raw_data['disk'] = collections.OrderedDict()
-		self._data['disk'] = collections.OrderedDict()
-		self._raw_data['disk']['counters'] = self._toDict(psutil.disk_io_counters(perdisk=True))
-		if self._old_data is not None:
-			self._data['disk']['counters'] = collections.OrderedDict()
-			for k, v in self._raw_data['disk']['counters'].items():
-				if k == self._disk_device or k == f'/dev/{self._disk_device}':
-					oldv = self._old_raw_data['disk']['counters'].get(k)
-					if oldv is not None:
-						self._data['disk']['counters'][k] = self._getDiff(v, oldv)
-
-			iostat = self._iostat.getStats()
+			self._data['disk'] = collections.OrderedDict()
+			iostat = st_new._raw_data['disk'].get('iostat')
 			if iostat is not None:
-				self._data['disk']['iostat'] = iostat
-			else:
-				log.warning('iostat has no data')
+				self._data['disk']['iostat'] = collections.OrderedDict()
+				for k in iostat.keys():
+					if k == 'disk_device': continue
+					count, sum_k = 0, 0
+					for st in st_list:
+						if st._raw_data['disk'].get('iostat') is not None:
+							count += 1
+							sum_k = st._raw_data['disk']['iostat'][k]
+					log.debug(f'iostat key={k}, sum={sum_k}, count={count}')
+					self._data['disk']['iostat'][k] = sum_k/count if count > 0 else 0
 
-	def getFS(self):
-		dev_re = f'(/dev/){{0,1}}{self._disk_device}[0-9]+'
-		self._data['fs'] = collections.OrderedDict()
-		self._data['fs']['mount'] = []
-		aux = self._toDict(psutil.disk_partitions())
-		for m in aux:
-			if len( re.findall(dev_re, m['device']) ) > 0:
-				self._data['fs']['mount'].append(m)
+			self._data['containers'] = collections.OrderedDict()
+			containers = st_new._raw_data['containers']
+			for name, data in containers.items():
+				i_data = { 'name': name,
+				           'id':   data['ID'], }
+				self._data['containers'][name] = i_data
 
-		self._data['fs']['statvfs'] = collections.OrderedDict()
-		dev_paths = set([x['device'] for x in self._data['fs']['mount']])
-		for d in dev_paths:
-			if len( re.findall(dev_re, d) ) > 0:
-				for m in self._data['fs']['mount']:
-					if m['device'] == d:
-						self._data['fs']['statvfs'][d] = self._toDict(os.statvfs(m['mountpoint']))
-						break
+				if  st_old._raw_data is not None \
+				and st_old._raw_data.get('containers') is not None \
+				and st_old._raw_data['containers'].get(name) is not None:
+					old_data = st_old._raw_data['containers'][name]
 
-	def getContainers(self):
-		containers = Containers().raw_data()
-		self._raw_data['containers'] = containers
-		self._data['containers'] = {}
-		for name, data in containers.items():
-			i_data = { 'name': name,
-			           'id':   data['ID'], }
-			self._data['containers'][name] = i_data
+					for diff_name in ('blkio.service_bytes', 'blkio.serviced'):
+						if data.get(diff_name) is None or old_data.get(diff_name) is None:
+							continue
+						i_data[f'{diff_name}/s'] = {}
+						for k, v in data[diff_name].items():
+							i_data[f'{diff_name}/s'][k] = (float(data[diff_name][k]) - float(old_data[diff_name][k])) / self._delta_t
+						log.debug(f'container {name}, {diff_name}    : {data[diff_name]}')
+						log.debug(f'container {name}, {diff_name} old: {old_data[diff_name]}')
+						log.debug(f'container {name}, {diff_name}/s: {i_data[f"{diff_name}/s"]}')
 
-			if  self._old_raw_data is not None \
-			and self._old_raw_data.get('containers') is not None \
-			and self._old_raw_data['containers'].get(name) is not None:
-				old_data = self._old_raw_data['containers'][name]
-
-				for diff_name in ('blkio.service_bytes', 'blkio.serviced'):
-					if data.get(diff_name) is None or old_data.get(diff_name) is None:
-						continue
-					i_data[f'{diff_name}/s'] = {}
-					for k, v in data[diff_name].items():
-						i_data[f'{diff_name}/s'][k] = (float(data[diff_name][k]) - float(old_data[diff_name][k])) / self._delta_t
-					log.debug(f'container {name}, {diff_name}    : {data[diff_name]}')
-					log.debug(f'container {name}, {diff_name} old: {old_data[diff_name]}')
-					log.debug(f'container {name}, {diff_name}/s: {i_data[f"{diff_name}/s"]}')
+	def _getPercent(self, aux_new, aux_old):
+		diffs = collections.OrderedDict()
+		ret = collections.OrderedDict()
+		for k, v in aux_new.items():
+			diffs[k] = v - aux_old[k]
+		aux_sum = sum(diffs.values())
+		for k, v in diffs.items():
+			ret[k] = v/aux_sum
+		return ret
 
 	def _toDict(self, data):
 		basetypes = (str, int, float, complex, bool)
@@ -365,19 +322,79 @@ class Stats:
 				ret[key] = value
 		return ret
 
-	def _getDiff(self, new, old):
-		ret = collections.OrderedDict()
-		for k, v in new.items():
-			ret[k] = v - old[k]
-		return ret
+	def __str__(self):
+		return 'STATS: {}'.format(json.dumps(self._data))
 
-	def counter(self): return self._counter
+#=============================================================================
+class Stats:
+	_raw_data = None
+
+	def __init__(self):
+		self._raw_data = collections.OrderedDict()
+
+		self.getTime()
+		self.getCPU()
+		self.getDisk()
+		#self.getFS()
+		self.getContainers()
+
+	def getTime(self):
+		t = datetime.datetime.now()
+		self._raw_data['time'] = t
+		self._raw_data['time_system'] = t.strftime('%Y-%m-%d %H:%M:%S')
+		self._raw_data['time_system_s'] = int(t.strftime('%s'))
+
+	def getCPU(self):
+		self._raw_data['cpu'] = collections.OrderedDict()
+
+		self._raw_data['cpu']['cores']   = psutil.cpu_count(logical=False)
+		self._raw_data['cpu']['threads'] = psutil.cpu_count(logical=True)
+		self._raw_data['cpu']['count']   = self._raw_data['cpu']['threads']
+
+		self._raw_data['cpu']['times_total'] = psutil.cpu_times()
+		self._raw_data['cpu']['times']       = psutil.cpu_times(percpu=True)
+
+	def getDisk(self):
+		self._raw_data['disk'] = collections.OrderedDict()
+		counters = psutil.disk_io_counters(perdisk=True)
+		if counters.get(args.device) is None:
+			raise Exception(f'could not get stats from device {args.device}')
+		self._raw_data['disk']['counters'] = counters[args.device]
+
+		st_io = iostat.getStats()
+		if st_io is not None:
+			self._raw_data['disk']['iostat'] = st_io
+		else:
+			log.warning('iostat has no data')
+
+	def getFS(self):
+		dev_re = f'(/dev/){{0,1}}{self._disk_device}[0-9]+'
+		self._data['fs'] = collections.OrderedDict()
+		self._data['fs']['mount'] = []
+		aux = self._toDict(psutil.disk_partitions())
+		for m in aux:
+			if len( re.findall(dev_re, m['device']) ) > 0:
+				self._data['fs']['mount'].append(m)
+
+		self._data['fs']['statvfs'] = collections.OrderedDict()
+		dev_paths = set([x['device'] for x in self._data['fs']['mount']])
+		for d in dev_paths:
+			if len( re.findall(dev_re, d) ) > 0:
+				for m in self._data['fs']['mount']:
+					if m['device'] == d:
+						self._data['fs']['statvfs'][d] = self._toDict(os.statvfs(m['mountpoint']))
+						break
+
+	def getContainers(self):
+		containers = Containers().raw_data()
+		self._raw_data['containers'] = containers
 
 	def __str__(self):
 		return 'STATS: {}'.format(json.dumps(self._data))
 
 #=============================================================================
-class IOstat (threading.Thread):
+class iostat (threading.Thread): # single instance
+	_self_ = None
 	_device = None
 	_interval = None
 	_started_ = False
@@ -389,7 +406,7 @@ class IOstat (threading.Thread):
 		threading.Thread.__init__(self)
 		self.name = 'iostat'
 		self._device = args.device
-		self._interval = args.interval
+		self._interval = 1
 
 	def run(self):
 		log.info('Starting subprocess iostat...')
@@ -414,24 +431,35 @@ class IOstat (threading.Thread):
 
 		self._proc = None
 
-	def stop(self):
-		log.info('Stopping IOstat')
-		if self._stop_: return
-		self._stop_ = True
-		if self._proc is not None:
-			self._proc.kill()
-			self._proc = None
-
 	def check(self):
 		if self._exception is not None:
 			raise self._exception
 		if self._started_ and self._proc is None:
 			raise Exception('iostat is not running')
 
-	def getStats(self):
+	@classmethod
+	def getStats(cls):
+		if cls._self_ is None:
+			cls._self_ = iostat()
+			cls._self_.start()
+			return None
+
+		self = cls._self_
 		if not self._stop_:
 			self.check()
 		return self._stats
+
+	@classmethod
+	def stop(cls):
+		self = cls._self_
+		if self is not None:
+			cls._self_ = None
+			log.info('Stopping IOstat')
+			if self._stop_: return
+			self._stop_ = True
+			if self._proc is not None:
+				self._proc.kill()
+				self._proc = None
 
 #=============================================================================
 class Partitions:
@@ -522,42 +550,39 @@ class Test:
 		f()
 
 	def args(self):
-		a = Args()
-		log.debug(a._args)
+		log.info(args)
 
 	def stats(self):
-		io = IOstat()
-		io.start()
-		s = Stats(None, io)
+		iostat.getStats()
+
+		st_list = []
+		st_list.append(Stats())
 		for i in range(0,4):
 			time.sleep(args.interval)
-			s = Stats(s, io)
-			log.debug(str(s))
-		io.stop()
+			st_list.append(Stats())
+			log.info(StatReport(st_list))
+		iostat.stop()
 
 	def iostat(self):
-		io = IOstat()
-		io.start()
 		for i in range(0,2):
 			time.sleep(args.interval)
-			log.debug(io.getStats())
-		io.stop()
+			log.info(iostat.getStats())
+		iostat.stop()
 
 	def partitions(self):
 		p = Partitions()
-		log.debug(p.data)
+		log.info(p.data)
 
 	def containers(self):
 		d = Containers()
-		log.debug(d.names())
-		log.debug(d.ids())
-		log.debug(d._container_names)
+		log.info(d.names())
+		log.info(d.ids())
+		log.info(d._container_names)
 
 #=============================================================================
 if __name__ == '__main__':
 	r = 0
 	try:
-		args = Args()
 		if args.test == '':
 			r = Program().main()
 		else:
