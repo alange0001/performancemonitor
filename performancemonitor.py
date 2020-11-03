@@ -89,6 +89,7 @@ args = ArgsWrapper()
 class Program: # single instance
 	_stop = False
 	_st_list = None
+	_st_list_lock = None
 
 	def main(self):
 		ret = 0
@@ -98,11 +99,12 @@ class Program: # single instance
 				signal.signal(getattr(signal, i),  lambda signumber, stack, signame=i: self.signalHandler(signame,  signumber, stack) )
 
 			self._st_list = []
+			self._st_list_lock = threading.Lock()
 
 			iostat.getStats()
 			self.collectStats()
 			time.sleep(1)
-			
+
 			CmdServer.start(self)
 
 			while not self._stop:
@@ -131,33 +133,47 @@ class Program: # single instance
 		self.stop()
 
 	def collectStats(self):
-		st = Stats()
-		sl = self._st_list[:]
-		sl.append(st)
-		if len(sl) > args.interval:
-			del sl[0]
-		self._st_list = sl
+		with self._st_list_lock:
+			st = Stats()
+			sl = self._st_list[:]
+			sl.append(st)
+			if len(sl) > args.interval:
+				del sl[0]
+			self._st_list = sl
 
 	def currentStats(self):
 		return self._st_list
+
+	def resetStats(self):
+		with self._st_list_lock:
+			self._st_list = []
 
 	def clientHandler(self, handlerObj): # called by CmdServer.ThreadedTCPRequestHandler
 		cur_thread = threading.current_thread()
 		log.info(f"{cur_thread.name}: Client handler initiated")
 		try:
 			while True:
-				message = str(handlerObj.request.recv(1024), 'utf-8')
+				message = str(handlerObj.request.recv(1024), 'utf-8').strip()
 				log.debug(f"{cur_thread.name}: message \"{message}\" received")
 
 				if self._stop:
 					break
 
-				if message == 'stats':
+				if message == 'alive':
+					write_message = bytes('yes', 'utf-8')
+					log.debug("Sending yes...")
+					handlerObj.request.sendall(write_message)
+
+				elif message == 'stats':
 					st_list = self.currentStats()
 					write_message = bytes(str(StatReport(st_list)), 'utf-8')
 
 					log.debug("Sending stats...")
 					handlerObj.request.sendall(write_message)
+
+				elif message == 'reset':
+					self.resetStats()
+					log.info("Reset stats...")
 
 				elif message == 'stop' or message == 'close' or message == '':
 					log.info(f"{cur_thread.name}: command {message} received")
@@ -259,7 +275,7 @@ class StatReport:
 						if st._raw_data['disk'].get('iostat') is not None:
 							count += 1
 							sum_k = st._raw_data['disk']['iostat'][k]
-					log.debug(f'iostat key={k}, sum={sum_k}, count={count}')
+					#log.debug(f'iostat key={k}, sum={sum_k}, count={count}')
 					self._data['disk']['iostat'][k] = sum_k/count if count > 0 else 0
 
 			self._data['containers'] = collections.OrderedDict()
@@ -424,7 +440,7 @@ class iostat (threading.Thread): # single instance
 					if len(r) > 0:
 						j = json.loads(r[0])
 						self._stats = j
-						log.debug('iostat: ' + str(j))
+						#log.debug('iostat: ' + str(j))
 					if self._stop_: break
 		except Exception as e:
 			self._exception = e
@@ -501,7 +517,7 @@ class Containers:
 
 		partition = Partitions()[args.device]
 		major_minor = f'{partition["major"]}:{partition["minor"]}'
-		log.debug(f'major_minor = {major_minor}')
+		#log.debug(f'major_minor = {major_minor}')
 
 		self._container_names = {}
 		self._container_ids   = {}
