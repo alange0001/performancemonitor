@@ -184,6 +184,9 @@ class Program: # single instance
 					raise Exception(f"invalid command: {message}")
 
 		except Exception as e:
+			if log.level == logging.DEBUG:
+				exc_type, exc_value, exc_traceback = sys.exc_info()
+				log.debug(f'{cur_thread.name}: Exception:\n' + ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
 			log.error(f"{cur_thread.name}: Exception received from clientHandler: {str(e)}")
 
 		log.info(f"{cur_thread.name}: Connection closed")
@@ -258,7 +261,7 @@ class StatReport:
 
 				self._data['cpu']['percent'] = []
 				for i in range(0, len(st_new._raw_data['cpu']['times'])):
-					self._data['cpu']['times'].append( self._getPercent(
+					self._data['cpu']['percent'].append( self._getPercent(
 							st_new._raw_data['cpu']['times'][i]._asdict(),
 							st_old._raw_data['cpu']['times'][i]._asdict()) )
 
@@ -280,25 +283,29 @@ class StatReport:
 
 			self._data['containers'] = collections.OrderedDict()
 			containers = st_new._raw_data['containers']
-			for name, data in containers.items():
-				i_data = { 'name': name,
-				           'id':   data['ID'], }
-				self._data['containers'][name] = i_data
+			for c_name, c_data in containers.items():
+				report_data = { 'name': c_name,
+				           'id':   c_data['ID'], }
+				self._data['containers'][c_name] = report_data
 
 				if  st_old._raw_data is not None \
 				and st_old._raw_data.get('containers') is not None \
-				and st_old._raw_data['containers'].get(name) is not None:
-					old_data = st_old._raw_data['containers'][name]
+				and st_old._raw_data['containers'].get(c_name) is not None:
+					old_c_data = st_old._raw_data['containers'][c_name]
 
 					for diff_name in ('blkio.service_bytes', 'blkio.serviced'):
-						if data.get(diff_name) is None or old_data.get(diff_name) is None:
+						if c_data.get(diff_name) is None or old_c_data.get(diff_name) is None:
 							continue
-						i_data[f'{diff_name}/s'] = {}
-						for k, v in data[diff_name].items():
-							i_data[f'{diff_name}/s'][k] = (float(data[diff_name][k]) - float(old_data[diff_name][k])) / self._delta_t
-						log.debug(f'container {name}, {diff_name}    : {data[diff_name]}')
-						log.debug(f'container {name}, {diff_name} old: {old_data[diff_name]}')
-						log.debug(f'container {name}, {diff_name}/s: {i_data[f"{diff_name}/s"]}')
+						rep_diff_name = f'{diff_name}/s'
+						report_data[rep_diff_name] = {}
+						for k, v in c_data[diff_name].items():
+							if old_c_data[diff_name].get(k) is None:
+								log.warning(f'container {c_name} has no old data [{diff_name}][{k}]')
+								continue
+							report_data[rep_diff_name][k] = (float(c_data[diff_name][k]) - float(old_c_data[diff_name][k])) / self._delta_t
+						log.debug(f'container {c_name}, {diff_name}    : {c_data[diff_name]}')
+						log.debug(f'container {c_name}, {diff_name} old: {old_c_data[diff_name]}')
+						log.debug(f'container {c_name}, {diff_name}/s  : {report_data[rep_diff_name]}')
 
 	def _getPercent(self, aux_new, aux_old):
 		diffs = collections.OrderedDict()
@@ -307,7 +314,7 @@ class StatReport:
 			diffs[k] = v - aux_old[k]
 		aux_sum = sum(diffs.values())
 		for k, v in diffs.items():
-			ret[k] = v/aux_sum
+			ret[k] = v/aux_sum  * 100.
 		return ret
 
 	def _toDict(self, data):
