@@ -379,10 +379,26 @@ class Stats:
 
 	def getDisk(self):
 		self._raw_data['disk'] = collections.OrderedDict()
-		counters = psutil.disk_io_counters(perdisk=True)
-		if counters.get(args.device) is None:
-			raise Exception(f'could not get stats from device {args.device}')
-		self._raw_data['disk']['counters'] = counters[args.device]
+
+		exitcode, output = subprocess.getstatusoutput(f"cat /sys/block/{args.device}/queue/hw_sector_size")
+		if exitcode != 0:
+			raise Exception(f'failed to get the sector size of device {args.device}')
+		self._raw_data['disk']['sector_size'] = int(output)
+
+		exitcode, output = subprocess.getstatusoutput(f"grep '{args.device} ' /proc/diskstats")
+		if exitcode != 0:
+			raise Exception(f'could not get diskstats from device {args.device}')
+		values = re.findall(r'(\w+)', output)
+		if len(values) < 18:
+			raise Exception(f'diskstats from device {args.device} are incomplete')
+		c, d = 3, collections.OrderedDict()
+		for n in ['read_count',  'read_merges',  'read_sectors',  'read_time_ms',
+		          'write_count', 'write_merges', 'write_sectors', 'write_time_ms',
+		          'cur_ios', 'io_time_ms', 'io_time_weighted_ms']:
+			if len(values) <= c: break
+			d[n] = int(values[c])
+			c += 1
+		self._raw_data['disk']['diskstats'] = d
 
 		st_io = iostat.getStats()
 		if st_io is not None:
@@ -390,23 +406,23 @@ class Stats:
 		else:
 			log.warning('iostat has no data')
 
-	def getFS(self):
-		dev_re = f'(/dev/){{0,1}}{self._disk_device}[0-9]+'
-		self._data['fs'] = collections.OrderedDict()
-		self._data['fs']['mount'] = []
-		aux = self._toDict(psutil.disk_partitions())
-		for m in aux:
-			if len( re.findall(dev_re, m['device']) ) > 0:
-				self._data['fs']['mount'].append(m)
+	#def getFS(self):
+	#	dev_re = f'(/dev/){{0,1}}{args.device}[0-9]+'
+	#	self._data['fs'] = collections.OrderedDict()
+	#	self._data['fs']['mount'] = []
+	#	aux = self._toDict(psutil.disk_partitions())
+	#	for m in aux:
+	#		if len( re.findall(dev_re, m['device']) ) > 0:
+	#			self._data['fs']['mount'].append(m)
 
-		self._data['fs']['statvfs'] = collections.OrderedDict()
-		dev_paths = set([x['device'] for x in self._data['fs']['mount']])
-		for d in dev_paths:
-			if len( re.findall(dev_re, d) ) > 0:
-				for m in self._data['fs']['mount']:
-					if m['device'] == d:
-						self._data['fs']['statvfs'][d] = self._toDict(os.statvfs(m['mountpoint']))
-						break
+	#	self._data['fs']['statvfs'] = collections.OrderedDict()
+	#	dev_paths = set([x['device'] for x in self._data['fs']['mount']])
+	#	for d in dev_paths:
+	#		if len( re.findall(dev_re, d) ) > 0:
+	#			for m in self._data['fs']['mount']:
+	#				if m['device'] == d:
+	#					self._data['fs']['statvfs'][d] = self._toDict(os.statvfs(m['mountpoint']))
+	#					break
 
 	def getContainers(self):
 		containers = Containers().raw_data()
