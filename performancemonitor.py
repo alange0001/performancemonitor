@@ -245,6 +245,7 @@ class StatReport:
 			self._data['time_system']   = st_new._raw_data['time_system']
 			self._data['time_system_s'] = st_new._raw_data['time_system_s']
 			self._data['time_delta']    = self._delta_t
+			log.debug(f'StatReport._delta_t = {self._delta_t}')
 
 			self._data['arg_device'] = args.device
 
@@ -273,11 +274,11 @@ class StatReport:
 				self._data['disk']['iostat'] = collections.OrderedDict()
 				for k in iostat.keys():
 					if k == 'disk_device': continue
-					count, sum_k = 0, 0
+					count, sum_k = 0, 0.
 					for st in st_list:
 						if st._raw_data['disk'].get('iostat') is not None:
 							count += 1
-							sum_k = st._raw_data['disk']['iostat'][k]
+							sum_k += st._raw_data['disk']['iostat'][k]
 					#log.debug(f'iostat key={k}, sum={sum_k}, count={count}')
 					self._data['disk']['iostat'][k] = sum_k/count if count > 0 else 0
 
