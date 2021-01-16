@@ -239,6 +239,7 @@ class StatReport:
 		self._data = collections.OrderedDict()
 		if st_list is not None and len(st_list) > 0:
 			st_new, st_old = st_list[-1], st_list[0]
+			log.debug(f'StatReport len(st_list) = {len(st_list)}')
 
 			self._delta_t = (st_new._raw_data['time'] - st_old._raw_data['time']).total_seconds()
 
@@ -289,16 +290,14 @@ class StatReport:
 				           'id':   c_data['ID'], }
 				self._data['containers'][c_name] = report_data
 
-				if  st_old._raw_data is not None \
-				and st_old._raw_data.get('containers') is not None \
-				and st_old._raw_data['containers'].get(c_name) is not None:
-					old_c_data = st_old._raw_data['containers'][c_name]
-
+				old_c_data = followAttr(st_old._raw_data, 'containers', c_name)
+				if old_c_data is not None:
 					for diff_name in ('blkio.service_bytes', 'blkio.serviced'):
 						if c_data.get(diff_name) is None or old_c_data.get(diff_name) is None:
 							continue
 						rep_diff_name = f'{diff_name}/s'
 						report_data[rep_diff_name] = {}
+						report_data[diff_name] = c_data[diff_name]
 						for k, v in c_data[diff_name].items():
 							if old_c_data[diff_name].get(k) is None:
 								log.warning(f'container {c_name} has no old data [{diff_name}][{k}]')
@@ -618,6 +617,24 @@ class Test:
 		log.info(d.names())
 		log.info(d.ids())
 		log.info(d._container_names)
+
+def followAttr(value, *attributes):
+	cur_v = value
+	for i in attributes:
+		if isinstance(cur_v, dict):
+			if cur_v.get(i) is not None:
+				cur_v = cur_v.get(i)
+			else:
+				return None
+		elif isinstance(cur_v, list) and isinstance(i, int):
+			if i >= 0 and i < len(cur_v):
+				cur_v = cur_v[i]
+			else:
+				return None
+		else:
+			return None
+	return cur_v
+
 
 #=============================================================================
 if __name__ == '__main__':
