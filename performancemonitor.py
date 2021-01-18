@@ -53,7 +53,7 @@ class ArgsWrapper: # single global instance "args"
 			default='stderr', choices=[ 'journal', 'stderr' ],
 			help='log handler')
 		parser.add_argument('-l', '--log_level', type=str,
-			default='INFO', choices=[ 'debug', 'DEBUG', 'info', 'INFO' ],
+			default='info', choices=[ 'debug', 'info' ],
 			help='log level')
 		parser.add_argument('-t', '--test', type=str,
 			default='',
@@ -246,7 +246,7 @@ class StatReport:
 			self._data['time_system']   = st_new._raw_data['time_system']
 			self._data['time_system_s'] = st_new._raw_data['time_system_s']
 			self._data['time_delta']    = self._delta_t
-			log.debug(f'StatReport._delta_t = {self._delta_t}')
+			log.debug(f'StatReport _delta_t = {self._delta_t}')
 
 			self._data['arg_device'] = args.device
 
@@ -280,8 +280,20 @@ class StatReport:
 						if st._raw_data['disk'].get('iostat') is not None:
 							count += 1
 							sum_k += st._raw_data['disk']['iostat'][k]
-					#log.debug(f'iostat key={k}, sum={sum_k}, count={count}')
+					#log.debug(f'StatReport iostat key={k}, sum={sum_k}, count={count}')
 					self._data['disk']['iostat'][k] = sum_k/count if count > 0 else 0
+
+			if st_new._raw_data['disk'].get('diskstats') is not None and st_old._raw_data['disk'].get('diskstats') is not None:
+				rep = collections.OrderedDict()
+				self._data['disk']['diskstats'] = rep
+				diskstats_new = st_new._raw_data['disk']['diskstats']
+				diskstats_old = st_old._raw_data['disk']['diskstats']
+				sector_size = st_new._raw_data['disk']['sector_size']
+
+				rep['r/s'] = (diskstats_new['read_count'] - diskstats_old['read_count']) / self._delta_t
+				rep['w/s'] = (diskstats_new['write_count'] - diskstats_old['write_count']) / self._delta_t
+				rep['rkB/s'] = ((diskstats_new['read_sectors'] - diskstats_old['read_sectors']) * sector_size) / (self._delta_t * 1024)
+				rep['wkB/s'] = ((diskstats_new['write_sectors'] - diskstats_old['write_sectors']) * sector_size) / (self._delta_t * 1024)
 
 			self._data['containers'] = collections.OrderedDict()
 			containers = st_new._raw_data['containers']
@@ -303,9 +315,19 @@ class StatReport:
 								log.warning(f'container {c_name} has no old data [{diff_name}][{k}]')
 								continue
 							report_data[rep_diff_name][k] = (float(c_data[diff_name][k]) - float(old_c_data[diff_name][k])) / self._delta_t
-						log.debug(f'container {c_name}, {diff_name}    : {c_data[diff_name]}')
-						log.debug(f'container {c_name}, {diff_name} old: {old_c_data[diff_name]}')
-						log.debug(f'container {c_name}, {diff_name}/s  : {report_data[rep_diff_name]}')
+						#log.debug(f'StatReport container {c_name}, {diff_name}    : {c_data[diff_name]}')
+						#log.debug(f'StatReport container {c_name}, {diff_name} old: {old_c_data[diff_name]}')
+						#log.debug(f'StatReport container {c_name}, {diff_name}/s  : {report_data[rep_diff_name]}')
+
+			if args.log_level == 'debug':
+				try:
+					log.debug(f'StatReport iostat   : r/s={self._data["disk"]["iostat"]["r/s"]}, w/s={self._data["disk"]["iostat"]["w/s"]}')
+					log.debug(f'StatReport diskstats: r/s={self._data["disk"]["diskstats"]["r/s"]}, w/s={self._data["disk"]["diskstats"]["w/s"]}')
+					log.debug(f'StatReport iostat   : read KB/s={self._data["disk"]["iostat"]["rkB/s"]}, write KB/s={self._data["disk"]["iostat"]["wkB/s"]}')
+					log.debug(f'StatReport diskstats: read KB/s={self._data["disk"]["diskstats"]["rkB/s"]}, write KB/s={self._data["disk"]["diskstats"]["wkB/s"]}')
+				except Exception as e:
+					exc_type, exc_value, exc_traceback = sys.exc_info()
+					sys.stderr.write('report debug exception:\n' + ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback)) + '\n')
 
 	def _getPercent(self, aux_new, aux_old):
 		diffs = collections.OrderedDict()
@@ -463,7 +485,7 @@ class iostat (threading.Thread): # single instance
 					if len(r) > 0:
 						j = json.loads(r[0])
 						self._stats = j
-						#log.debug('iostat: ' + str(j))
+						#log.debug(f'iostat: rkB/s={j["rkB/s"]}, wkB/s={j["wkB/s"]}')
 					if self._stop_: break
 		except Exception as e:
 			self._exception = e
