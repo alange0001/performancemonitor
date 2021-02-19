@@ -49,6 +49,9 @@ class ArgsWrapper: # single global instance "args"
 		parser.add_argument('-d', '--device', type=str,
 			default='sda',
 			help='disk device name')
+		parser.add_argument('-s', '--smart',
+			default=False, action="store_true",
+			help='smartctl data (root required)')
 		parser.add_argument('-o', '--log_handler', type=str,
 			default='stderr', choices=[ 'journal', 'stderr' ],
 			help='log handler')
@@ -302,7 +305,7 @@ class StatReport:
 				           'id':   c_data['ID'], }
 				self._data['containers'][c_name] = report_data
 
-				old_c_data = followAttr(st_old._raw_data, 'containers', c_name)
+				old_c_data = getRecursive(st_old._raw_data, 'containers', c_name)
 				if old_c_data is not None:
 					for diff_name in ('blkio.service_bytes', 'blkio.serviced'):
 						if c_data.get(diff_name) is None or old_c_data.get(diff_name) is None:
@@ -318,6 +321,11 @@ class StatReport:
 						#log.debug(f'StatReport container {c_name}, {diff_name}    : {c_data[diff_name]}')
 						#log.debug(f'StatReport container {c_name}, {diff_name} old: {old_c_data[diff_name]}')
 						#log.debug(f'StatReport container {c_name}, {diff_name}/s  : {report_data[rep_diff_name]}')
+
+			if args.smart:
+				self._data['smart'] = st_new._raw_data['smart']
+				if args.log_level == 'debug':
+					log.debug(f'StatReport smart : {self._data["smart"]}')
 
 			if args.log_level == 'debug':
 				try:
@@ -382,6 +390,7 @@ class Stats:
 		self.getDisk()
 		#self.getFS()
 		self.getContainers()
+		self.getSmart()
 
 	def getTime(self):
 		t = datetime.datetime.now()
@@ -449,6 +458,33 @@ class Stats:
 	def getContainers(self):
 		containers = Containers().raw_data()
 		self._raw_data['containers'] = containers
+
+	def getSmart(self):
+		if args.smart:
+			cmd = f'smartctl -a "/dev/{args.device}"'
+			data = collections.OrderedDict()
+			self._raw_data['smart'] = data
+
+			exitcode, output = subprocess.getstatusoutput(cmd)
+			if exitcode != 0:
+				raise Exception(f'smartctl returned error {exitcode}')
+
+			v = re.findall(r'Namespace 1 Size/Capacity: +([0-9.]+)', output)
+			#log.debug(f'getSmart(): v = {v}')
+			if len(v) > 0:
+				data['capacity'] = v[0].replace('.', '')
+
+			v = re.findall(r'Namespace 1 Utilization: +([0-9.]+)', output)
+			#log.debug(f'getSmart(): v = {v}')
+			if len(v) > 0:
+				data['utilization'] = v[0].replace('.', '')
+
+			v = re.findall(r'Temperature: +([0-9.]+)', output)
+			#log.debug(f'getSmart(): v = {v}')
+			if len(v) > 0:
+				data['temperature'] = v[0]
+
+			#log.debug(f'getSmart(): data = {data}')
 
 	def __str__(self):
 		return 'STATS: {}'.format(json.dumps(self._data))
@@ -640,23 +676,14 @@ class Test:
 		log.info(d.ids())
 		log.info(d._container_names)
 
-def followAttr(value, *attributes):
+def getRecursive(value, *attributes):
 	cur_v = value
 	for i in attributes:
-		if isinstance(cur_v, dict):
-			if cur_v.get(i) is not None:
-				cur_v = cur_v.get(i)
-			else:
-				return None
-		elif isinstance(cur_v, list) and isinstance(i, int):
-			if i >= 0 and i < len(cur_v):
-				cur_v = cur_v[i]
-			else:
-				return None
-		else:
+		try:
+			cur_v = cur_v[i]
+		except:
 			return None
 	return cur_v
-
 
 #=============================================================================
 if __name__ == '__main__':
