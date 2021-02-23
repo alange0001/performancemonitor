@@ -29,14 +29,15 @@ import json
 import re
 import traceback
 
-#=============================================================================
+# =============================================================================
 import logging
 from systemd.journal import JournalHandler
 log = logging.getLogger('performancemonitor')
 log.setLevel(logging.INFO)
 
-#=============================================================================
-class ArgsWrapper: # single global instance "args"
+
+# =============================================================================
+class ArgsWrapper:  # single global instance "args"
 	def get_args(self):
 		parser = argparse.ArgumentParser(
 			description="Performance monitor server.")
@@ -86,9 +87,11 @@ class ArgsWrapper: # single global instance "args"
 		args = self.get_args()
 		return getattr(args, name)
 
+
 args = ArgsWrapper()
 
-#=============================================================================
+
+# =============================================================================
 class Program: # single instance
 	_stop = False
 	_st_list = None
@@ -99,19 +102,20 @@ class Program: # single instance
 		try:
 			log.info("Program initiated")
 			for i in ('SIGINT', 'SIGTERM'):
-				signal.signal(getattr(signal, i),  lambda signumber, stack, signame=i: self.signalHandler(signame,  signumber, stack) )
+				signal.signal(getattr(signal, i),
+				              lambda signumber, stack, signame=i: self.signal_handler(signame, signumber, stack))
 
 			self._st_list = []
 			self._st_list_lock = threading.Lock()
 
-			iostat.getStats()
-			self.collectStats()
+			IoStat.get_stats()
+			self.collect_stats()
 			time.sleep(1)
 
 			CmdServer.start(self)
 
 			while not self._stop:
-				self.collectStats()
+				self.collect_stats()
 				time.sleep(1)
 
 		except Exception as e:
@@ -129,13 +133,13 @@ class Program: # single instance
 		if not self._stop:
 			self._stop = True
 			CmdServer.stop()
-			iostat.stop()
+			IoStat.stop()
 
-	def signalHandler(self, signame, signumber, stack):
-		log.warning("signal {} received".format(signame))
+	def signal_handler(self, signame, signumber, stack):
+		log.warning(f"signal {signame} received")
 		self.stop()
 
-	def collectStats(self):
+	def collect_stats(self):
 		with self._st_list_lock:
 			st = Stats()
 			sl = self._st_list[:]
@@ -144,14 +148,14 @@ class Program: # single instance
 				del sl[0]
 			self._st_list = sl
 
-	def currentStats(self):
+	def current_stats(self):
 		return self._st_list
 
-	def resetStats(self):
+	def reset_stats(self):
 		with self._st_list_lock:
 			self._st_list = []
 
-	def clientHandler(self, handlerObj): # called by CmdServer.ThreadedTCPRequestHandler
+	def client_handler(self, handlerObj):  # called by CmdServer.ThreadedTCPRequestHandler
 		cur_thread = threading.current_thread()
 		log.info(f"{cur_thread.name}: Client handler initiated")
 		try:
@@ -168,14 +172,14 @@ class Program: # single instance
 					handlerObj.request.sendall(write_message)
 
 				elif message == 'stats':
-					st_list = self.currentStats()
+					st_list = self.current_stats()
 					write_message = bytes(str(StatReport(st_list)), 'utf-8')
 
 					log.debug("Sending stats...")
 					handlerObj.request.sendall(write_message)
 
 				elif message == 'reset':
-					self.resetStats()
+					self.reset_stats()
 					log.info("Reset stats...")
 
 				elif message == 'stop' or message == 'close' or message == '':
@@ -189,13 +193,15 @@ class Program: # single instance
 		except Exception as e:
 			if log.level == logging.DEBUG:
 				exc_type, exc_value, exc_traceback = sys.exc_info()
-				log.debug(f'{cur_thread.name}: Exception:\n' + ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
-			log.error(f"{cur_thread.name}: Exception received from clientHandler: {str(e)}")
+				log.debug(f'{cur_thread.name}: Exception:\n' +
+				          ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
+			log.error(f"{cur_thread.name}: Exception received from client_handler: {str(e)}")
 
 		log.info(f"{cur_thread.name}: Connection closed")
 
-#=============================================================================
-class CmdServer: # single instance
+
+# =============================================================================
+class CmdServer:  # single instance
 	_self_         = None
 	_stop          = False
 	_server        = None
@@ -204,10 +210,12 @@ class CmdServer: # single instance
 	# https://docs.python.org/3/library/socketserver.html
 	class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 		pass
+
 	class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
 		_program = None
+
 		def handle(self):
-			self._program.clientHandler(self)
+			self._program.client_handler(self)
 
 	def __init__(self, program):
 		self.ThreadedTCPRequestHandler._program = program
@@ -233,7 +241,8 @@ class CmdServer: # single instance
 			log.info(f'Stopping {self.__class__.__name__}')
 			self._server.shutdown()
 
-#=============================================================================
+
+# =============================================================================
 class StatReport:
 	_delta_t = None
 	_data = None
@@ -257,16 +266,16 @@ class StatReport:
 			for k in ['cores', 'threads', 'count']:
 				self._data['cpu'][k]   = st_new._raw_data['cpu'][k]
 			for k in ['times_total', 'times']:
-				self._data['cpu'][k] = self._toDict(st_new._raw_data['cpu'][k])
+				self._data['cpu'][k] = self._to_dict(st_new._raw_data['cpu'][k])
 
 			if len(st_list) > 1:
-				self._data['cpu']['percent_total'] = self._getPercent(
+				self._data['cpu']['percent_total'] = self._get_percent(
 						st_new._raw_data['cpu']['times_total']._asdict(),
 						st_old._raw_data['cpu']['times_total']._asdict())
 
 				self._data['cpu']['percent'] = []
 				for i in range(0, len(st_new._raw_data['cpu']['times'])):
-					self._data['cpu']['percent'].append( self._getPercent(
+					self._data['cpu']['percent'].append( self._get_percent(
 							st_new._raw_data['cpu']['times'][i]._asdict(),
 							st_old._raw_data['cpu']['times'][i]._asdict()) )
 
@@ -305,7 +314,7 @@ class StatReport:
 				           'id':   c_data['ID'], }
 				self._data['containers'][c_name] = report_data
 
-				old_c_data = getRecursive(st_old._raw_data, 'containers', c_name)
+				old_c_data = get_recursive(st_old._raw_data, 'containers', c_name)
 				if old_c_data is not None:
 					for diff_name in ('blkio.service_bytes', 'blkio.serviced'):
 						if c_data.get(diff_name) is None or old_c_data.get(diff_name) is None:
@@ -318,9 +327,9 @@ class StatReport:
 								log.warning(f'container {c_name} has no old data [{diff_name}][{k}]')
 								continue
 							report_data[rep_diff_name][k] = (float(c_data[diff_name][k]) - float(old_c_data[diff_name][k])) / self._delta_t
-						#log.debug(f'StatReport container {c_name}, {diff_name}    : {c_data[diff_name]}')
-						#log.debug(f'StatReport container {c_name}, {diff_name} old: {old_c_data[diff_name]}')
-						#log.debug(f'StatReport container {c_name}, {diff_name}/s  : {report_data[rep_diff_name]}')
+						# log.debug(f'StatReport container {c_name}, {diff_name}    : {c_data[diff_name]}')
+						# log.debug(f'StatReport container {c_name}, {diff_name} old: {old_c_data[diff_name]}')
+						# log.debug(f'StatReport container {c_name}, {diff_name}/s  : {report_data[rep_diff_name]}')
 
 			if args.smart:
 				self._data['smart'] = st_new._raw_data['smart']
@@ -337,7 +346,7 @@ class StatReport:
 					exc_type, exc_value, exc_traceback = sys.exc_info()
 					sys.stderr.write('report debug exception:\n' + ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback)) + '\n')
 
-	def _getPercent(self, aux_new, aux_old):
+	def _get_percent(self, aux_new, aux_old):
 		diffs = collections.OrderedDict()
 		ret = collections.OrderedDict()
 		for k, v in aux_new.items():
@@ -347,21 +356,21 @@ class StatReport:
 			ret[k] = v/aux_sum  * 100.
 		return ret
 
-	def _toDict(self, data):
-		basetypes = (str, int, float, complex, bool)
-		if isinstance(data, basetypes):
+	def _to_dict(self, data):
+		base_types = (str, int, float, complex, bool)
+		if isinstance(data, base_types):
 			return data
 
 		if isinstance(data, list):
 			ret = []
 			for v in data:
-				ret.append(self._toDict(v))
+				ret.append(self._to_dict(v))
 			return ret
 
 		if isinstance(data, dict):
 			ret = collections.OrderedDict()
 			for k, v in data.items():
-				ret[k] = self._toDict(v)
+				ret[k] = self._to_dict(v)
 			return ret
 
 		d = dir(data)
@@ -371,34 +380,35 @@ class StatReport:
 		ret = collections.OrderedDict()
 		for key in d:
 			value = getattr(data, key)
-			if key[0] != '_' and isinstance (value, basetypes):
+			if key[0] != '_' and isinstance (value, base_types):
 				ret[key] = value
 		return ret
 
 	def __str__(self):
 		return 'STATS: {}'.format(json.dumps(self._data))
 
-#=============================================================================
+
+# =============================================================================
 class Stats:
 	_raw_data = None
 
 	def __init__(self):
 		self._raw_data = collections.OrderedDict()
 
-		self.getTime()
-		self.getCPU()
-		self.getDisk()
-		#self.getFS()
-		self.getContainers()
-		self.getSmart()
+		self.get_time()
+		self.get_cpu()
+		self.get_disk()
+		# self.get_fs()
+		self.get_containers()
+		self.get_smart()
 
-	def getTime(self):
+	def get_time(self):
 		t = datetime.datetime.now()
 		self._raw_data['time'] = t
 		self._raw_data['time_system'] = t.strftime('%Y-%m-%d %H:%M:%S')
 		self._raw_data['time_system_s'] = int(t.strftime('%s'))
 
-	def getCPU(self):
+	def get_cpu(self):
 		self._raw_data['cpu'] = collections.OrderedDict()
 
 		self._raw_data['cpu']['cores']   = psutil.cpu_count(logical=False)
@@ -408,7 +418,7 @@ class Stats:
 		self._raw_data['cpu']['times_total'] = psutil.cpu_times()
 		self._raw_data['cpu']['times']       = psutil.cpu_times(percpu=True)
 
-	def getDisk(self):
+	def get_disk(self):
 		self._raw_data['disk'] = collections.OrderedDict()
 
 		exitcode, output = subprocess.getstatusoutput(f"cat /sys/block/{args.device}/queue/hw_sector_size")
@@ -431,35 +441,35 @@ class Stats:
 			c += 1
 		self._raw_data['disk']['diskstats'] = d
 
-		st_io = iostat.getStats()
+		st_io = IoStat.get_stats()
 		if st_io is not None:
 			self._raw_data['disk']['iostat'] = st_io
 		else:
 			log.warning('iostat has no data')
 
-	#def getFS(self):
-	#	dev_re = f'(/dev/){{0,1}}{args.device}[0-9]+'
-	#	self._data['fs'] = collections.OrderedDict()
-	#	self._data['fs']['mount'] = []
-	#	aux = self._toDict(psutil.disk_partitions())
-	#	for m in aux:
-	#		if len( re.findall(dev_re, m['device']) ) > 0:
-	#			self._data['fs']['mount'].append(m)
+	# def get_fs(self):
+	# 	dev_re = f'(/dev/){{0,1}}{args.device}[0-9]+'
+	# 	self._data['fs'] = collections.OrderedDict()
+	# 	self._data['fs']['mount'] = []
+	# 	aux = self._toDict(psutil.disk_partitions())
+	# 	for m in aux:
+	# 		if len( re.findall(dev_re, m['device']) ) > 0:
+	# 			self._data['fs']['mount'].append(m)
+	#
+	# 	self._data['fs']['statvfs'] = collections.OrderedDict()
+	# 	dev_paths = set([x['device'] for x in self._data['fs']['mount']])
+	# 	for d in dev_paths:
+	# 		if len( re.findall(dev_re, d) ) > 0:
+	# 			for m in self._data['fs']['mount']:
+	# 				if m['device'] == d:
+	# 					self._data['fs']['statvfs'][d] = self._toDict(os.statvfs(m['mountpoint']))
+	# 					break
 
-	#	self._data['fs']['statvfs'] = collections.OrderedDict()
-	#	dev_paths = set([x['device'] for x in self._data['fs']['mount']])
-	#	for d in dev_paths:
-	#		if len( re.findall(dev_re, d) ) > 0:
-	#			for m in self._data['fs']['mount']:
-	#				if m['device'] == d:
-	#					self._data['fs']['statvfs'][d] = self._toDict(os.statvfs(m['mountpoint']))
-	#					break
-
-	def getContainers(self):
+	def get_containers(self):
 		containers = Containers().raw_data()
 		self._raw_data['containers'] = containers
 
-	def getSmart(self):
+	def get_smart(self):
 		if args.smart:
 			cmd = f'smartctl -a "/dev/{args.device}"'
 			data = collections.OrderedDict()
@@ -470,27 +480,28 @@ class Stats:
 				raise Exception(f'smartctl returned error {exitcode}')
 
 			v = re.findall(r'Namespace 1 Size/Capacity: +([0-9.]+)', output)
-			#log.debug(f'getSmart(): v = {v}')
+			# log.debug(f'getSmart(): v = {v}')
 			if len(v) > 0:
 				data['capacity'] = v[0].replace('.', '')
 
 			v = re.findall(r'Namespace 1 Utilization: +([0-9.]+)', output)
-			#log.debug(f'getSmart(): v = {v}')
+			# log.debug(f'getSmart(): v = {v}')
 			if len(v) > 0:
 				data['utilization'] = v[0].replace('.', '')
 
 			v = re.findall(r'Temperature: +([0-9.]+)', output)
-			#log.debug(f'getSmart(): v = {v}')
+			# log.debug(f'getSmart(): v = {v}')
 			if len(v) > 0:
 				data['temperature'] = v[0]
 
-			#log.debug(f'getSmart(): data = {data}')
+			# log.debug(f'getSmart(): data = {data}')
 
 	def __str__(self):
 		return 'STATS: {}'.format(json.dumps(self._data))
 
-#=============================================================================
-class iostat (threading.Thread): # single instance
+
+# =============================================================================
+class IoStat (threading.Thread):  # single instance
 	_self_ = None
 	_device = None
 	_interval = None
@@ -499,6 +510,7 @@ class iostat (threading.Thread): # single instance
 	_exception = None
 	_proc = None
 	_stats = None
+
 	def __init__(self):
 		threading.Thread.__init__(self)
 		self.name = 'iostat'
@@ -521,7 +533,7 @@ class iostat (threading.Thread): # single instance
 					if len(r) > 0:
 						j = json.loads(r[0])
 						self._stats = j
-						#log.debug(f'iostat: rkB/s={j["rkB/s"]}, wkB/s={j["wkB/s"]}')
+						# log.debug(f'iostat: rkB/s={j["rkB/s"]}, wkB/s={j["wkB/s"]}')
 					if self._stop_: break
 		except Exception as e:
 			self._exception = e
@@ -535,9 +547,9 @@ class iostat (threading.Thread): # single instance
 			raise Exception('iostat is not running')
 
 	@classmethod
-	def getStats(cls):
+	def get_stats(cls):
 		if cls._self_ is None:
-			cls._self_ = iostat()
+			cls._self_ = IoStat()
 			cls._self_.start()
 			return None
 
@@ -558,10 +570,12 @@ class iostat (threading.Thread): # single instance
 				self._proc.kill()
 				self._proc = None
 
-#=============================================================================
+
+# =============================================================================
 class Partitions:
 	data = None
 	data_major_minor = None
+
 	def __init__(self):
 		if self.__class__.data is None:
 			log.debug('Partitions: load partitions')
@@ -586,10 +600,12 @@ class Partitions:
 		if r is not None: return r
 		raise Exception(f'partition "{idx}" not found')
 
-#=============================================================================
+
+# =============================================================================
 class Containers:
 	_container_names = None
 	_container_ids   = None
+
 	def __init__(self):
 		cmd = "docker ps --format '{{json . }}'"
 		exitcode, output = subprocess.getstatusoutput(cmd)
@@ -598,7 +614,7 @@ class Containers:
 
 		partition = Partitions()[args.device]
 		major_minor = f'{partition["major"]}:{partition["minor"]}'
-		#log.debug(f'major_minor = {major_minor}')
+		# log.debug(f'major_minor = {major_minor}')
 
 		self._container_names = {}
 		self._container_ids   = {}
@@ -629,16 +645,20 @@ class Containers:
 
 	def names(self):
 		return self._container_names.keys()
+
 	def ids(self):
 		return self._container_ids.keys()
+
 	def raw_data(self):
 		return self._container_names
+
 	def __getitem__(self, idx):
 		r = self._container_names.get(idx)
 		if r is not None: return r
 		return self._container_ids[idx]
 
-#=============================================================================
+
+# =============================================================================
 class Test:
 	def __init__(self, name):
 		f = getattr(self, name)
@@ -647,10 +667,12 @@ class Test:
 		f()
 
 	def args(self):
+		log.info(f'{self.__class__.__name__}.args()')
 		log.info(args)
 
 	def stats(self):
-		iostat.getStats()
+		log.info(f'{self.__class__.__name__}.stats()')
+		IoStat.get_stats()
 
 		st_list = []
 		st_list.append(Stats())
@@ -658,25 +680,30 @@ class Test:
 			time.sleep(args.interval)
 			st_list.append(Stats())
 			log.info(StatReport(st_list))
-		iostat.stop()
+		IoStat.stop()
 
 	def iostat(self):
+		log.info(f'{self.__class__.__name__}.iostat()')
 		for i in range(0,2):
 			time.sleep(args.interval)
-			log.info(iostat.getStats())
-		iostat.stop()
+			log.info(IoStat.get_stats())
+		IoStat.stop()
 
 	def partitions(self):
+		log.info(f'{self.__class__.__name__}.partitions()')
 		p = Partitions()
 		log.info(p.data)
 
 	def containers(self):
+		log.info(f'{self.__class__.__name__}.containers()')
 		d = Containers()
 		log.info(d.names())
 		log.info(d.ids())
 		log.info(d._container_names)
 
-def getRecursive(value, *attributes):
+
+# =============================================================================
+def get_recursive(value, *attributes):
 	cur_v = value
 	for i in attributes:
 		try:
@@ -685,7 +712,8 @@ def getRecursive(value, *attributes):
 			return None
 	return cur_v
 
-#=============================================================================
+
+# =============================================================================
 if __name__ == '__main__':
 	r = 0
 	try:
@@ -699,7 +727,8 @@ if __name__ == '__main__':
 	except Exception as e:
 		if log.level == logging.DEBUG:
 			exc_type, exc_value, exc_traceback = sys.exc_info()
-			sys.stderr.write('main exception:\n' + ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback)) + '\n')
+			sys.stderr.write('main exception:\n' +
+			                 ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback)) + '\n')
 		else:
 			sys.stderr.write(str(e) + '\n')
 		exit(1)
