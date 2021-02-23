@@ -253,10 +253,10 @@ class StatReport:
 			st_new, st_old = st_list[-1], st_list[0]
 			log.debug(f'StatReport len(st_list) = {len(st_list)}')
 
-			self._delta_t = (st_new._raw_data['time'] - st_old._raw_data['time']).total_seconds()
+			self._delta_t = (st_new.raw_data['time'] - st_old.raw_data['time']).total_seconds()
 
-			self._data['time_system']   = st_new._raw_data['time_system']
-			self._data['time_system_s'] = st_new._raw_data['time_system_s']
+			self._data['time_system']   = st_new.raw_data['time_system']
+			self._data['time_system_s'] = st_new.raw_data['time_system_s']
 			self._data['time_delta']    = self._delta_t
 			log.debug(f'StatReport _delta_t = {self._delta_t}')
 
@@ -264,43 +264,43 @@ class StatReport:
 
 			self._data['cpu'] = collections.OrderedDict()
 			for k in ['cores', 'threads', 'count']:
-				self._data['cpu'][k]   = st_new._raw_data['cpu'][k]
+				self._data['cpu'][k]   = st_new.raw_data['cpu'][k]
 			for k in ['times_total', 'times']:
-				self._data['cpu'][k] = self._to_dict(st_new._raw_data['cpu'][k])
+				self._data['cpu'][k] = self._to_dict(st_new.raw_data['cpu'][k])
 
 			if len(st_list) > 1:
 				self._data['cpu']['percent_total'] = self._get_percent(
-						st_new._raw_data['cpu']['times_total']._asdict(),
-						st_old._raw_data['cpu']['times_total']._asdict())
+						st_new.raw_data['cpu']['times_total']._asdict(),
+						st_old.raw_data['cpu']['times_total']._asdict())
 
 				self._data['cpu']['percent'] = []
-				for i in range(0, len(st_new._raw_data['cpu']['times'])):
+				for i in range(0, len(st_new.raw_data['cpu']['times'])):
 					self._data['cpu']['percent'].append( self._get_percent(
-							st_new._raw_data['cpu']['times'][i]._asdict(),
-							st_old._raw_data['cpu']['times'][i]._asdict()) )
+							st_new.raw_data['cpu']['times'][i]._asdict(),
+							st_old.raw_data['cpu']['times'][i]._asdict()) )
 
 			self._data['cpu']['idle_time_names'] = [ 'idle', 'iowait', 'steal' ]
 
 			self._data['disk'] = collections.OrderedDict()
-			iostat = st_new._raw_data['disk'].get('iostat')
+			iostat = st_new.raw_data['disk'].get('iostat')
 			if iostat is not None:
 				self._data['disk']['iostat'] = collections.OrderedDict()
 				for k in iostat.keys():
 					if k == 'disk_device': continue
 					count, sum_k = 0, 0.
 					for st in st_list:
-						if st._raw_data['disk'].get('iostat') is not None:
+						if st.raw_data['disk'].get('iostat') is not None:
 							count += 1
-							sum_k += st._raw_data['disk']['iostat'][k]
+							sum_k += st.raw_data['disk']['iostat'][k]
 					#log.debug(f'StatReport iostat key={k}, sum={sum_k}, count={count}')
 					self._data['disk']['iostat'][k] = sum_k/count if count > 0 else 0
 
-			if st_new._raw_data['disk'].get('diskstats') is not None and st_old._raw_data['disk'].get('diskstats') is not None:
+			if st_new.raw_data['disk'].get('diskstats') is not None and st_old.raw_data['disk'].get('diskstats') is not None:
 				rep = collections.OrderedDict()
 				self._data['disk']['diskstats'] = rep
-				diskstats_new = st_new._raw_data['disk']['diskstats']
-				diskstats_old = st_old._raw_data['disk']['diskstats']
-				sector_size = st_new._raw_data['disk']['sector_size']
+				diskstats_new = st_new.raw_data['disk']['diskstats']
+				diskstats_old = st_old.raw_data['disk']['diskstats']
+				sector_size = st_new.raw_data['disk']['sector_size']
 
 				rep['r/s'] = (diskstats_new['read_count'] - diskstats_old['read_count']) / self._delta_t
 				rep['w/s'] = (diskstats_new['write_count'] - diskstats_old['write_count']) / self._delta_t
@@ -308,13 +308,13 @@ class StatReport:
 				rep['wkB/s'] = ((diskstats_new['write_sectors'] - diskstats_old['write_sectors']) * sector_size) / (self._delta_t * 1024)
 
 			self._data['containers'] = collections.OrderedDict()
-			containers = st_new._raw_data['containers']
+			containers = st_new.raw_data['containers']
 			for c_name, c_data in containers.items():
 				report_data = { 'name': c_name,
 				           'id':   c_data['ID'], }
 				self._data['containers'][c_name] = report_data
 
-				old_c_data = get_recursive(st_old._raw_data, 'containers', c_name)
+				old_c_data = get_recursive(st_old.raw_data, 'containers', c_name)
 				if old_c_data is not None:
 					for diff_name in ('blkio.service_bytes', 'blkio.serviced'):
 						if c_data.get(diff_name) is None or old_c_data.get(diff_name) is None:
@@ -332,7 +332,7 @@ class StatReport:
 						# log.debug(f'StatReport container {c_name}, {diff_name}/s  : {report_data[rep_diff_name]}')
 
 			if args.smart:
-				self._data['smart'] = st_new._raw_data['smart']
+				self._data['smart'] = st_new.raw_data['smart']
 				if args.log_level == 'debug':
 					log.debug(f'StatReport smart : {self._data["smart"]}')
 
@@ -390,41 +390,40 @@ class StatReport:
 
 # =============================================================================
 class Stats:
-	_raw_data = None
+	raw_data = None
 
 	def __init__(self):
-		self._raw_data = collections.OrderedDict()
+		self.raw_data = collections.OrderedDict()
+		self._get_time()
+		self._get_cpu()
+		self._get_disk()
+		# self._get_fs()
+		self._get_containers()
+		self._get_smart()
 
-		self.get_time()
-		self.get_cpu()
-		self.get_disk()
-		# self.get_fs()
-		self.get_containers()
-		self.get_smart()
-
-	def get_time(self):
+	def _get_time(self):
 		t = datetime.datetime.now()
-		self._raw_data['time'] = t
-		self._raw_data['time_system'] = t.strftime('%Y-%m-%d %H:%M:%S')
-		self._raw_data['time_system_s'] = int(t.strftime('%s'))
+		self.raw_data['time'] = t
+		self.raw_data['time_system'] = t.strftime('%Y-%m-%d %H:%M:%S')
+		self.raw_data['time_system_s'] = int(t.strftime('%s'))
 
-	def get_cpu(self):
-		self._raw_data['cpu'] = collections.OrderedDict()
+	def _get_cpu(self):
+		self.raw_data['cpu'] = collections.OrderedDict()
 
-		self._raw_data['cpu']['cores']   = psutil.cpu_count(logical=False)
-		self._raw_data['cpu']['threads'] = psutil.cpu_count(logical=True)
-		self._raw_data['cpu']['count']   = self._raw_data['cpu']['threads']
+		self.raw_data['cpu']['cores']   = psutil.cpu_count(logical=False)
+		self.raw_data['cpu']['threads'] = psutil.cpu_count(logical=True)
+		self.raw_data['cpu']['count']   = self.raw_data['cpu']['threads']
 
-		self._raw_data['cpu']['times_total'] = psutil.cpu_times()
-		self._raw_data['cpu']['times']       = psutil.cpu_times(percpu=True)
+		self.raw_data['cpu']['times_total'] = psutil.cpu_times()
+		self.raw_data['cpu']['times']       = psutil.cpu_times(percpu=True)
 
-	def get_disk(self):
-		self._raw_data['disk'] = collections.OrderedDict()
+	def _get_disk(self):
+		self.raw_data['disk'] = collections.OrderedDict()
 
 		exitcode, output = subprocess.getstatusoutput(f"cat /sys/block/{args.device}/queue/hw_sector_size")
 		if exitcode != 0:
 			raise Exception(f'failed to get the sector size of device {args.device}')
-		self._raw_data['disk']['sector_size'] = int(output)
+		self.raw_data['disk']['sector_size'] = int(output)
 
 		exitcode, output = subprocess.getstatusoutput(f"grep '{args.device} ' /proc/diskstats")
 		if exitcode != 0:
@@ -439,15 +438,15 @@ class Stats:
 			if len(values) <= c: break
 			d[n] = int(values[c])
 			c += 1
-		self._raw_data['disk']['diskstats'] = d
+		self.raw_data['disk']['diskstats'] = d
 
 		st_io = IoStat.get_stats()
 		if st_io is not None:
-			self._raw_data['disk']['iostat'] = st_io
+			self.raw_data['disk']['iostat'] = st_io
 		else:
 			log.warning('iostat has no data')
 
-	# def get_fs(self):
+	# def _get_fs(self):
 	# 	dev_re = f'(/dev/){{0,1}}{args.device}[0-9]+'
 	# 	self._data['fs'] = collections.OrderedDict()
 	# 	self._data['fs']['mount'] = []
@@ -465,15 +464,15 @@ class Stats:
 	# 					self._data['fs']['statvfs'][d] = self._toDict(os.statvfs(m['mountpoint']))
 	# 					break
 
-	def get_containers(self):
+	def _get_containers(self):
 		containers = Containers().raw_data()
-		self._raw_data['containers'] = containers
+		self.raw_data['containers'] = containers
 
-	def get_smart(self):
+	def _get_smart(self):
 		if args.smart:
 			cmd = f'smartctl -a "/dev/{args.device}"'
 			data = collections.OrderedDict()
-			self._raw_data['smart'] = data
+			self.raw_data['smart'] = data
 
 			exitcode, output = subprocess.getstatusoutput(cmd)
 			if exitcode != 0:
@@ -497,7 +496,7 @@ class Stats:
 			# log.debug(f'getSmart(): data = {data}')
 
 	def __str__(self):
-		return 'STATS: {}'.format(json.dumps(self._data))
+		return 'STATS: {}'.format(json.dumps(self.raw_data))
 
 
 # =============================================================================
