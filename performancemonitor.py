@@ -332,7 +332,16 @@ class StatReport:
 						# log.debug(f'StatReport container {c_name}, {diff_name}/s  : {report_data[rep_diff_name]}')
 
 			if args.smart:
-				self._data['smart'] = st_new.raw_data['smart']
+				diff_keys = ['units_read', 'units_written', 'read_commands', 'write_commands']
+				smart_data = collections.OrderedDict()
+				self._data['smart'] = smart_data
+				for k, v in st_new.raw_data['smart'].items():
+					if k in diff_keys:
+						old_v = get_recursive(st_old.raw_data, 'smart', k)
+						if old_v is not None:
+							smart_data[f'{k}/s'] = (float(v) - float(old_v)) / self._delta_t
+					else:
+						smart_data[k] = v
 				if args.log_level == 'debug':
 					log.debug(f'StatReport smart : {self._data["smart"]}')
 
@@ -469,6 +478,15 @@ class Stats:
 		self.raw_data['containers'] = containers
 
 	def _get_smart(self):
+		def get_val(_data: dict, _key: str, _output: str, _pattern: str, _type=str, _remove_separator: bool = False) -> None:
+			aux = re.findall(_pattern, _output)
+			# log.debug(f'_get_smart(): v = {v}')
+			if len(aux) > 0:
+				if _remove_separator:
+					_data[_key] = _type(aux[0].replace('.', '').replace(',', ''))
+				else:
+					_data[_key] = _type(aux[0])
+
 		if args.smart:
 			cmd = f'smartctl -a "/dev/{args.device}"'
 			data = collections.OrderedDict()
@@ -478,22 +496,19 @@ class Stats:
 			if exitcode != 0:
 				raise Exception(f'smartctl returned error {exitcode}')
 
-			v = re.findall(r'Namespace 1 Size/Capacity: +([0-9.]+)', output)
-			# log.debug(f'getSmart(): v = {v}')
-			if len(v) > 0:
-				data['capacity'] = v[0].replace('.', '')
+			get_val(data, 'model',            output, r'Model Number: +(.+)',                    str)
+			get_val(data, 'serial',           output, r'Serial Number: +(.+)',                   str)
+			get_val(data, 'firmware',         output, r'Firmware Version: +(.+)',                str)
+			get_val(data, 'lifetime_percent', output, r'Percentage Used: +([0-9]+)',             int)
+			get_val(data, 'capacity',         output, r'Namespace 1 Size/Capacity: +([0-9.,]+)', int, True)
+			get_val(data, 'utilization',      output, r'Namespace 1 Utilization: +([0-9.,]+)',   int, True)
+			get_val(data, 'temperature',      output, r'Temperature: +([0-9]+)',                 int)
+			get_val(data, 'units_read',       output, r'Data Units Read: +([0-9.,]+)',           int, True)
+			get_val(data, 'units_written',    output, r'Data Units Written: +([0-9.,]+)',        int, True)
+			get_val(data, 'read_commands',    output, r'Host Read Commands: +([0-9.,]+)',        int, True)
+			get_val(data, 'write_commands',   output, r'Host Write Commands: +([0-9.,]+)',       int, True)
 
-			v = re.findall(r'Namespace 1 Utilization: +([0-9.]+)', output)
-			# log.debug(f'getSmart(): v = {v}')
-			if len(v) > 0:
-				data['utilization'] = v[0].replace('.', '')
-
-			v = re.findall(r'Temperature: +([0-9.]+)', output)
-			# log.debug(f'getSmart(): v = {v}')
-			if len(v) > 0:
-				data['temperature'] = v[0]
-
-			# log.debug(f'getSmart(): data = {data}')
+	# log.debug(f'_get_smart(): data = {data}')
 
 	def __str__(self):
 		return 'STATS: {}'.format(json.dumps(self.raw_data))
