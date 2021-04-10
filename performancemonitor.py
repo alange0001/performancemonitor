@@ -30,10 +30,15 @@ import re
 import traceback
 
 # =============================================================================
+version = 1.1
+sys_info = None
+
+# =============================================================================
 import logging
 from systemd.journal import JournalHandler
 log = logging.getLogger('performancemonitor')
 log.setLevel(logging.INFO)
+
 
 
 # =============================================================================
@@ -104,6 +109,8 @@ class Program: # single instance
 			for i in ('SIGINT', 'SIGTERM'):
 				signal.signal(getattr(signal, i),
 				              lambda signumber, stack, signame=i: self.signal_handler(signame, signumber, stack))
+
+			get_sys_info()
 
 			self._st_list = []
 			self._st_list_lock = threading.Lock()
@@ -260,13 +267,17 @@ class StatReport:
 			self._data['time_delta']    = self._delta_t
 			log.debug(f'StatReport _delta_t = {self._delta_t}')
 
+			self._data['perfmon_version'] = version
+			if sys_info is not None:
+				self._data['system_info'] = sys_info
+
 			self._data['arg_device'] = args.device
 
 			self._data['cpu'] = collections.OrderedDict()
 			for k in ['cores', 'threads', 'count']:
 				self._data['cpu'][k]   = st_new.raw_data['cpu'][k]
 			for k in ['times_total', 'times']:
-				self._data['cpu'][k] = self._to_dict(st_new.raw_data['cpu'][k])
+				self._data['cpu'][k] = to_dict(st_new.raw_data['cpu'][k])
 
 			if len(st_list) > 1:
 				self._data['cpu']['percent_total'] = self._get_percent(
@@ -306,6 +317,12 @@ class StatReport:
 				rep['w/s'] = (diskstats_new['write_count'] - diskstats_old['write_count']) / self._delta_t
 				rep['rkB/s'] = ((diskstats_new['read_sectors'] - diskstats_old['read_sectors']) * sector_size) / (self._delta_t * 1024)
 				rep['wkB/s'] = ((diskstats_new['write_sectors'] - diskstats_old['write_sectors']) * sector_size) / (self._delta_t * 1024)
+
+			if st_new.raw_data['disk'].get('scheduler') is not None:
+				self._data['disk']['scheduler'] = st_new.raw_data['disk']['scheduler']
+
+			if st_new.raw_data.get('fs') is not None:
+				self._data['fs'] = st_new.raw_data['fs']
 
 			self._data['containers'] = collections.OrderedDict()
 			containers = st_new.raw_data['containers']
@@ -365,34 +382,6 @@ class StatReport:
 			ret[k] = v/aux_sum  * 100.
 		return ret
 
-	def _to_dict(self, data):
-		base_types = (str, int, float, complex, bool)
-		if isinstance(data, base_types):
-			return data
-
-		if isinstance(data, list):
-			ret = []
-			for v in data:
-				ret.append(self._to_dict(v))
-			return ret
-
-		if isinstance(data, dict):
-			ret = collections.OrderedDict()
-			for k, v in data.items():
-				ret[k] = self._to_dict(v)
-			return ret
-
-		d = dir(data)
-		if '_asdict' in d:
-			return data._asdict()
-
-		ret = collections.OrderedDict()
-		for key in d:
-			value = getattr(data, key)
-			if key[0] != '_' and isinstance (value, base_types):
-				ret[key] = value
-		return ret
-
 	def __str__(self):
 		return 'STATS: {}'.format(json.dumps(self._data))
 
@@ -406,7 +395,7 @@ class Stats:
 		self._get_time()
 		self._get_cpu()
 		self._get_disk()
-		# self._get_fs()
+		self._get_fs()
 		self._get_containers()
 		self._get_smart()
 
@@ -455,23 +444,25 @@ class Stats:
 		else:
 			log.warning('iostat has no data')
 
-	# def _get_fs(self):
-	# 	dev_re = f'(/dev/){{0,1}}{args.device}[0-9]+'
-	# 	self._data['fs'] = collections.OrderedDict()
-	# 	self._data['fs']['mount'] = []
-	# 	aux = self._toDict(psutil.disk_partitions())
-	# 	for m in aux:
-	# 		if len( re.findall(dev_re, m['device']) ) > 0:
-	# 			self._data['fs']['mount'].append(m)
-	#
-	# 	self._data['fs']['statvfs'] = collections.OrderedDict()
-	# 	dev_paths = set([x['device'] for x in self._data['fs']['mount']])
-	# 	for d in dev_paths:
-	# 		if len( re.findall(dev_re, d) ) > 0:
-	# 			for m in self._data['fs']['mount']:
-	# 				if m['device'] == d:
-	# 					self._data['fs']['statvfs'][d] = self._toDict(os.statvfs(m['mountpoint']))
-	# 					break
+		with open(f'/sys/block/{args.device}/queue/scheduler', 'r') as schedfile:
+			s = re.findall(r'\[([^\]]+)\]', schedfile.readlines()[0])
+			if len(s) > 0:
+				self.raw_data['disk']['scheduler'] = s[0]
+
+	def _get_fs(self):
+		dev_re = f'(/dev/){{0,1}}{args.device}'
+		self.raw_data['fs'] = collections.OrderedDict()
+		aux = psutil.disk_partitions()
+		for m in aux:
+			if len(re.findall(dev_re, m.device)) > 0:
+				self.raw_data['fs'][m.mountpoint] = collections.OrderedDict()
+				for k, v in to_dict(m).items():
+					if k != 'mountpoint':
+						self.raw_data['fs'][m.mountpoint][k] = v
+
+				# total = 461708984320, used = 242486398976, free = 217889386496, percent = 52.7
+				for k, v in to_dict(psutil.disk_usage(m.mountpoint)).items():
+					self.raw_data['fs'][m.mountpoint][k] = v
 
 	def _get_containers(self):
 		containers = Containers().raw_data()
@@ -726,6 +717,44 @@ def get_recursive(value, *attributes):
 			return None
 	return cur_v
 
+
+# =============================================================================
+def to_dict(data):
+	base_types = (str, int, float, complex, bool)
+	if isinstance(data, base_types):
+		return data
+
+	if isinstance(data, list):
+		ret = []
+		for v in data:
+			ret.append(to_dict(v))
+		return ret
+
+	if isinstance(data, dict):
+		ret = collections.OrderedDict()
+		for k, v in data.items():
+			ret[k] = to_dict(v)
+		return ret
+
+	d = dir(data)
+	if '_asdict' in d:
+		return data._asdict()
+
+	ret = collections.OrderedDict()
+	for key in d:
+		value = getattr(data, key)
+		if key[0] != '_' and isinstance (value, base_types):
+			ret[key] = value
+	return ret
+
+
+# =============================================================================
+def get_sys_info() -> None:
+	global sys_info
+	st, out = subprocess.getstatusoutput('uname -a')
+	if st != 0:
+		raise Exception('failed to read the system information (uname -a)')
+	sys_info = out
 
 # =============================================================================
 if __name__ == '__main__':
