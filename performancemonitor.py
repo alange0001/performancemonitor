@@ -28,17 +28,14 @@ import collections
 import json
 import re
 import traceback
-
-# =============================================================================
-version = 1.1
-sys_info = None
-
-# =============================================================================
 import logging
 from systemd.journal import JournalHandler
+
+# =============================================================================
+version = 1.2
+# =============================================================================
 log = logging.getLogger('performancemonitor')
 log.setLevel(logging.INFO)
-
 
 
 # =============================================================================
@@ -99,8 +96,6 @@ args = ArgsWrapper()
 # =============================================================================
 class Program: # single instance
 	_stop = False
-	_st_list = None
-	_st_list_lock = None
 
 	def main(self):
 		ret = 0
@@ -112,17 +107,12 @@ class Program: # single instance
 
 			get_sys_info()
 
-			self._st_list = []
-			self._st_list_lock = threading.Lock()
-
-			IoStat.get_stats()
-			self.collect_stats()
+			IoStat().start()
 			time.sleep(1)
 
 			CmdServer.start(self)
 
 			while not self._stop:
-				self.collect_stats()
 				time.sleep(1)
 
 		except Exception as e:
@@ -146,26 +136,12 @@ class Program: # single instance
 		log.warning(f"signal {signame} received")
 		self.stop()
 
-	def collect_stats(self):
-		with self._st_list_lock:
-			st = Stats()
-			sl = self._st_list[:]
-			sl.append(st)
-			if len(sl) > args.interval:
-				del sl[0]
-			self._st_list = sl
-
-	def current_stats(self):
-		return self._st_list
-
-	def reset_stats(self):
-		with self._st_list_lock:
-			self._st_list = []
-
 	def client_handler(self, handlerObj):  # called by CmdServer.ThreadedTCPRequestHandler
 		cur_thread = threading.current_thread()
 		log.info(f"{cur_thread.name}: Client handler initiated")
 		try:
+			old_stats, new_stats = None, Stats()
+
 			while True:
 				message = str(handlerObj.request.recv(1024), 'utf-8').strip()
 				log.debug(f"{cur_thread.name}: message \"{message}\" received")
@@ -179,14 +155,14 @@ class Program: # single instance
 					handlerObj.request.sendall(write_message)
 
 				elif message == 'stats':
-					st_list = self.current_stats()
-					write_message = bytes(str(StatReport(st_list)), 'utf-8')
+					old_stats, new_stats = new_stats, Stats()
+					write_message = bytes(str(StatReport(new_stats, old_stats)), 'utf-8')
 
 					log.debug("Sending stats...")
 					handlerObj.request.sendall(write_message)
 
 				elif message == 'reset':
-					self.reset_stats()
+					old_stats, new_stats = new_stats, Stats()
 					log.info("Reset stats...")
 
 				elif message == 'stop' or message == 'close' or message == '':
@@ -195,7 +171,9 @@ class Program: # single instance
 					break
 
 				else:
-					raise Exception(f"invalid command: {message}")
+					ret_msg = f"invalid command: {message}"
+					log.error(ret_msg)
+					handlerObj.request.sendall(bytes(ret_msg, 'utf-8'))
 
 		except Exception as e:
 			if log.level == logging.DEBUG:
@@ -254,123 +232,120 @@ class StatReport:
 	_delta_t = None
 	_data = None
 
-	def __init__(self, st_list):
+	def __init__(self, st_new, st_old):
 		self._data = collections.OrderedDict()
-		if st_list is not None and len(st_list) > 0:
-			st_new, st_old = st_list[-1], st_list[0]
-			log.debug(f'StatReport len(st_list) = {len(st_list)}')
 
-			self._delta_t = (st_new.raw_data['time'] - st_old.raw_data['time']).total_seconds()
+		log.debug(f'StatReport')
+		if st_new.raw_data['time'] == st_old.raw_data['time']:
+			raise Exception('old and new stats are the same')
 
-			self._data['time_system']   = st_new.raw_data['time_system']
-			self._data['time_system_s'] = st_new.raw_data['time_system_s']
-			self._data['time_delta']    = self._delta_t
-			log.debug(f'StatReport _delta_t = {self._delta_t}')
+		self._delta_t = (st_new.raw_data['time'] - st_old.raw_data['time']).total_seconds()
 
-			self._data['perfmon_version'] = version
-			if sys_info is not None:
-				self._data['system_info'] = sys_info
+		self._data['time_system']   = st_new.raw_data['time_system']
+		self._data['time_system_s'] = st_new.raw_data['time_system_s']
+		self._data['time_delta']    = self._delta_t
+		log.debug(f'StatReport _delta_t = {self._delta_t}')
 
-			self._data['arg_device'] = args.device
+		self._data['perfmon_version'] = version
+		self._data['system_info'] = get_sys_info()
 
-			self._data['cpu'] = collections.OrderedDict()
-			for k in ['cores', 'threads', 'count']:
-				self._data['cpu'][k]   = st_new.raw_data['cpu'][k]
-			for k in ['times_total', 'times']:
-				self._data['cpu'][k] = to_dict(st_new.raw_data['cpu'][k])
+		self._data['arg_device'] = args.device
 
-			if len(st_list) > 1:
-				self._data['cpu']['percent_total'] = self._get_percent(
-						st_new.raw_data['cpu']['times_total']._asdict(),
-						st_old.raw_data['cpu']['times_total']._asdict())
+		self._data['cpu'] = collections.OrderedDict()
+		for k in ['cores', 'threads', 'count']:
+			self._data['cpu'][k]   = st_new.raw_data['cpu'][k]
+		for k in ['times_total', 'times']:
+			self._data['cpu'][k] = to_dict(st_new.raw_data['cpu'][k])
 
-				self._data['cpu']['percent'] = []
-				for i in range(0, len(st_new.raw_data['cpu']['times'])):
-					self._data['cpu']['percent'].append( self._get_percent(
-							st_new.raw_data['cpu']['times'][i]._asdict(),
-							st_old.raw_data['cpu']['times'][i]._asdict()) )
+		self._data['cpu']['percent_total'] = self._get_percent(
+				st_new.raw_data['cpu']['times_total']._asdict(),
+				st_old.raw_data['cpu']['times_total']._asdict())
 
-			self._data['cpu']['idle_time_names'] = [ 'idle', 'iowait', 'steal' ]
+		self._data['cpu']['percent'] = []
+		for i in range(0, len(st_new.raw_data['cpu']['times'])):
+			self._data['cpu']['percent'].append( self._get_percent(
+					st_new.raw_data['cpu']['times'][i]._asdict(),
+					st_old.raw_data['cpu']['times'][i]._asdict()) )
 
-			self._data['disk'] = collections.OrderedDict()
-			iostat = st_new.raw_data['disk'].get('iostat')
-			if iostat is not None:
-				self._data['disk']['iostat'] = collections.OrderedDict()
-				for k in iostat.keys():
-					if k == 'disk_device': continue
-					count, sum_k = 0, 0.
-					for st in st_list:
-						if st.raw_data['disk'].get('iostat') is not None:
-							count += 1
-							sum_k += st.raw_data['disk']['iostat'][k]
-					#log.debug(f'StatReport iostat key={k}, sum={sum_k}, count={count}')
-					self._data['disk']['iostat'][k] = sum_k/count if count > 0 else 0
+		self._data['cpu']['idle_time_names'] = ['idle', 'iowait', 'steal']
 
-			if st_new.raw_data['disk'].get('diskstats') is not None and st_old.raw_data['disk'].get('diskstats') is not None:
-				rep = collections.OrderedDict()
-				self._data['disk']['diskstats'] = rep
-				diskstats_new = st_new.raw_data['disk']['diskstats']
-				diskstats_old = st_old.raw_data['disk']['diskstats']
-				sector_size = st_new.raw_data['disk']['sector_size']
+		self._data['disk'] = collections.OrderedDict()
+		iostat = IoStat.get_stats(max(1, int(round(self._delta_t))))
+		if iostat is not None:
+			self._data['disk']['iostat'] = iostat
 
-				rep['r/s'] = (diskstats_new['read_count'] - diskstats_old['read_count']) / self._delta_t
-				rep['w/s'] = (diskstats_new['write_count'] - diskstats_old['write_count']) / self._delta_t
-				rep['rkB/s'] = ((diskstats_new['read_sectors'] - diskstats_old['read_sectors']) * sector_size) / (self._delta_t * 1024)
-				rep['wkB/s'] = ((diskstats_new['write_sectors'] - diskstats_old['write_sectors']) * sector_size) / (self._delta_t * 1024)
+		if st_new.raw_data['disk'].get('diskstats') is not None and st_old.raw_data['disk'].get('diskstats') is not None:
+			rep = collections.OrderedDict()
+			self._data['disk']['diskstats'] = rep
+			diskstats_new = st_new.raw_data['disk']['diskstats']
+			diskstats_old = st_old.raw_data['disk']['diskstats']
+			sector_size = st_new.raw_data['disk']['sector_size']
 
-			if st_new.raw_data['disk'].get('scheduler') is not None:
-				self._data['disk']['scheduler'] = st_new.raw_data['disk']['scheduler']
+			for kr, kd in [
+						   ('r/s', 'read_count'), ('w/s', 'write_count'),
+						   ('r_sectors/s', 'read_sectors'), ('w_sectors/s', 'write_sectors')]:
+				rep[kr] = (diskstats_new[kd] - diskstats_old[kd]) / self._delta_t
 
-			if st_new.raw_data.get('fs') is not None:
-				self._data['fs'] = st_new.raw_data['fs']
+			rep['rkB/s'] = ((diskstats_new['read_sectors'] - diskstats_old['read_sectors']) * sector_size) / (self._delta_t * 1024)
+			rep['wkB/s'] = ((diskstats_new['write_sectors'] - diskstats_old['write_sectors']) * sector_size) / (self._delta_t * 1024)
 
-			self._data['containers'] = collections.OrderedDict()
-			containers = st_new.raw_data['containers']
-			for c_name, c_data in containers.items():
-				report_data = { 'name': c_name,
-				           'id':   c_data['ID'], }
-				self._data['containers'][c_name] = report_data
+			for k in ['read_time_ms', 'write_time_ms', 'io_time_ms', 'io_time_weighted_ms']:
+				rep[k] = diskstats_new[k] - diskstats_old[k]
+			rep['cur_ios'] = diskstats_new['cur_ios']
 
-				old_c_data = get_recursive(st_old.raw_data, 'containers', c_name)
-				if old_c_data is not None:
-					for diff_name in ('blkio.service_bytes', 'blkio.serviced'):
-						if c_data.get(diff_name) is None or old_c_data.get(diff_name) is None:
+		if st_new.raw_data['disk'].get('scheduler') is not None:
+			self._data['disk']['scheduler'] = st_new.raw_data['disk']['scheduler']
+
+		if st_new.raw_data.get('fs') is not None:
+			self._data['fs'] = st_new.raw_data['fs']
+
+		self._data['containers'] = collections.OrderedDict()
+		containers = st_new.raw_data['containers']
+		for c_name, c_data in containers.items():
+			report_data = { 'name': c_name,
+					   'id':   c_data['ID'], }
+			self._data['containers'][c_name] = report_data
+
+			old_c_data = get_recursive(st_old.raw_data, 'containers', c_name)
+			if old_c_data is not None:
+				for diff_name in ('blkio.service_bytes', 'blkio.serviced'):
+					if c_data.get(diff_name) is None or old_c_data.get(diff_name) is None:
+						continue
+					rep_diff_name = f'{diff_name}/s'
+					report_data[rep_diff_name] = {}
+					report_data[diff_name] = c_data[diff_name]
+					for k, v in c_data[diff_name].items():
+						if old_c_data[diff_name].get(k) is None:
+							log.warning(f'container {c_name} has no old data [{diff_name}][{k}]')
 							continue
-						rep_diff_name = f'{diff_name}/s'
-						report_data[rep_diff_name] = {}
-						report_data[diff_name] = c_data[diff_name]
-						for k, v in c_data[diff_name].items():
-							if old_c_data[diff_name].get(k) is None:
-								log.warning(f'container {c_name} has no old data [{diff_name}][{k}]')
-								continue
-							report_data[rep_diff_name][k] = (float(c_data[diff_name][k]) - float(old_c_data[diff_name][k])) / self._delta_t
-						# log.debug(f'StatReport container {c_name}, {diff_name}    : {c_data[diff_name]}')
-						# log.debug(f'StatReport container {c_name}, {diff_name} old: {old_c_data[diff_name]}')
-						# log.debug(f'StatReport container {c_name}, {diff_name}/s  : {report_data[rep_diff_name]}')
+						report_data[rep_diff_name][k] = (float(c_data[diff_name][k]) - float(old_c_data[diff_name][k])) / self._delta_t
+					# log.debug(f'StatReport container {c_name}, {diff_name}    : {c_data[diff_name]}')
+					# log.debug(f'StatReport container {c_name}, {diff_name} old: {old_c_data[diff_name]}')
+					# log.debug(f'StatReport container {c_name}, {diff_name}/s  : {report_data[rep_diff_name]}')
 
-			if args.smart:
-				diff_keys = ['units_read', 'units_written', 'read_commands', 'write_commands']
-				smart_data = collections.OrderedDict()
-				self._data['smart'] = smart_data
-				for k, v in st_new.raw_data['smart'].items():
-					if k in diff_keys:
-						old_v = get_recursive(st_old.raw_data, 'smart', k)
-						if old_v is not None:
-							smart_data[f'{k}/s'] = (float(v) - float(old_v)) / self._delta_t
-					else:
-						smart_data[k] = v
-				if args.log_level == 'debug':
-					log.debug(f'StatReport smart : {self._data["smart"]}')
-
+		if args.smart:
+			diff_keys = ['units_read', 'units_written', 'read_commands', 'write_commands']
+			smart_data = collections.OrderedDict()
+			self._data['smart'] = smart_data
+			for k, v in st_new.raw_data['smart'].items():
+				if k in diff_keys:
+					old_v = get_recursive(st_old.raw_data, 'smart', k)
+					if old_v is not None:
+						smart_data[f'{k}/s'] = (float(v) - float(old_v)) / self._delta_t
+				else:
+					smart_data[k] = v
 			if args.log_level == 'debug':
-				try:
-					log.debug(f'StatReport iostat   : r/s={self._data["disk"]["iostat"]["r/s"]}, w/s={self._data["disk"]["iostat"]["w/s"]}')
-					log.debug(f'StatReport diskstats: r/s={self._data["disk"]["diskstats"]["r/s"]}, w/s={self._data["disk"]["diskstats"]["w/s"]}')
-					log.debug(f'StatReport iostat   : read KB/s={self._data["disk"]["iostat"]["rkB/s"]}, write KB/s={self._data["disk"]["iostat"]["wkB/s"]}')
-					log.debug(f'StatReport diskstats: read KB/s={self._data["disk"]["diskstats"]["rkB/s"]}, write KB/s={self._data["disk"]["diskstats"]["wkB/s"]}')
-				except Exception as e:
-					exc_type, exc_value, exc_traceback = sys.exc_info()
-					sys.stderr.write('report debug exception:\n' + ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback)) + '\n')
+				log.debug(f'StatReport smart : {self._data["smart"]}')
+
+		if args.log_level == 'debug':
+			try:
+				log.debug(f'StatReport iostat   : r/s={self._data["disk"]["iostat"]["r/s"]}, w/s={self._data["disk"]["iostat"]["w/s"]}')
+				log.debug(f'StatReport diskstats: r/s={self._data["disk"]["diskstats"]["r/s"]}, w/s={self._data["disk"]["diskstats"]["w/s"]}')
+				log.debug(f'StatReport iostat   : read KB/s={self._data["disk"]["iostat"]["rkB/s"]}, write KB/s={self._data["disk"]["iostat"]["wkB/s"]}')
+				log.debug(f'StatReport diskstats: read KB/s={self._data["disk"]["diskstats"]["rkB/s"]}, write KB/s={self._data["disk"]["diskstats"]["wkB/s"]}')
+			except Exception as e:
+				exc_type, exc_value, exc_traceback = sys.exc_info()
+				sys.stderr.write('report debug exception:\n' + ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback)) + '\n')
 
 	def _get_percent(self, aux_new, aux_old):
 		diffs = collections.OrderedDict()
@@ -437,12 +412,6 @@ class Stats:
 			d[n] = int(values[c])
 			c += 1
 		self.raw_data['disk']['diskstats'] = d
-
-		st_io = IoStat.get_stats()
-		if st_io is not None:
-			self.raw_data['disk']['iostat'] = st_io
-		else:
-			log.warning('iostat has no data')
 
 		with open(f'/sys/block/{args.device}/queue/scheduler', 'r') as schedfile:
 			s = re.findall(r'\[([^\]]+)\]', schedfile.readlines()[0])
@@ -514,13 +483,20 @@ class IoStat (threading.Thread):  # single instance
 	_stop_ = False
 	_exception = None
 	_proc = None
+	_stats_lock = None
 	_stats = None
 
 	def __init__(self):
+		if self.__class__._self_ is not None:
+			raise Exception('class IoStat initiated twice')
+		self.__class__._self_ = self
+
 		threading.Thread.__init__(self)
 		self.name = 'iostat'
 		self._device = args.device
 		self._interval = 1
+		self._stats = []
+		self._stats_lock = threading.Lock()
 
 	def run(self):
 		log.info('Starting subprocess iostat...')
@@ -537,7 +513,10 @@ class IoStat (threading.Thread):  # single instance
 					r = re.findall(r'(\{"disk_device"[^}]+\})', s)
 					if len(r) > 0:
 						j = json.loads(r[0])
-						self._stats = j
+						with self._stats_lock:
+							while len(self._stats) > 60:
+								del self._stats[0]
+							self._stats.append(j)
 						# log.debug(f'iostat: rkB/s={j["rkB/s"]}, wkB/s={j["wkB/s"]}')
 					if self._stop_: break
 		except Exception as e:
@@ -552,16 +531,30 @@ class IoStat (threading.Thread):  # single instance
 			raise Exception('iostat is not running')
 
 	@classmethod
-	def get_stats(cls):
+	def get_stats(cls, interval: int):
 		if cls._self_ is None:
-			cls._self_ = IoStat()
-			cls._self_.start()
+			log.warning('IOstat not initiated')
 			return None
 
 		self = cls._self_
 		if not self._stop_:
 			self.check()
-		return self._stats
+
+		ret = collections.OrderedDict()
+		with self._stats_lock:
+			aux_interval = min(interval, len(self._stats))
+			if aux_interval < interval:
+				log.warning(f'requested iostat interval ({interval}) is greater than available ({aux_interval})')
+			if aux_interval == 0:
+				return None
+			# log.debug(f'IoStats.get_stats: aux_interval = {aux_interval}')
+			ret['disk_device'] = self._stats[-1]['disk_device']
+			for k in self._stats[-1].keys():
+				if k == 'disk_device': continue
+				aux_sum = sum([self._stats[i][k] for i in range(-1, -1*aux_interval -1, -1)])
+				# log.debug(f'IoStats.get_stats: k = {k}, aux_sum = {aux_sum}')
+				ret[k] = aux_sum / float(aux_interval)
+		return ret
 
 	@classmethod
 	def stop(cls):
@@ -677,22 +670,20 @@ class Test:
 
 	def stats(self):
 		log.info(f'{self.__class__.__name__}.stats()')
-		IoStat.get_stats()
+		IoStat().start()
 
-		st_list = []
-		st_list.append(Stats())
-		for i in range(0,4):
+		old_stats, new_stats = None, Stats()
+		while True:
 			time.sleep(args.interval)
-			st_list.append(Stats())
-			log.info(StatReport(st_list))
-		IoStat.stop()
+			old_stats, new_stats = new_stats, Stats()
+			log.info(StatReport(new_stats, old_stats))
 
 	def iostat(self):
 		log.info(f'{self.__class__.__name__}.iostat()')
-		for i in range(0,2):
+		IoStat().start()
+		while True:
 			time.sleep(args.interval)
-			log.info(IoStat.get_stats())
-		IoStat.stop()
+			log.info(IoStat.get_stats(args.interval))
 
 	def partitions(self):
 		log.info(f'{self.__class__.__name__}.partitions()')
@@ -705,6 +696,10 @@ class Test:
 		log.info(d.names())
 		log.info(d.ids())
 		log.info(d._container_names)
+
+	def sys_info(self):
+		log.info(f'{self.__class__.__name__}.containers()')
+		print(get_sys_info())
 
 
 # =============================================================================
@@ -749,12 +744,20 @@ def to_dict(data):
 
 
 # =============================================================================
-def get_sys_info() -> None:
-	global sys_info
-	st, out = subprocess.getstatusoutput('uname -a')
-	if st != 0:
-		raise Exception('failed to read the system information (uname -a)')
-	sys_info = out
+_sys_info = None
+def get_sys_info() -> dict:
+	global _sys_info
+	if _sys_info is None:
+		ret = collections.OrderedDict()
+		for k in ['all', 'kernel-name', 'nodename', 'kernel-release', 'kernel-version', 'machine']:
+			st, out = subprocess.getstatusoutput(f'uname --{k}')
+			if st != 0:
+				raise Exception('failed to read the system information (uname -a)')
+			ret[k] = out
+		_sys_info = ret
+
+	return _sys_info
+
 
 # =============================================================================
 if __name__ == '__main__':
