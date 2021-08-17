@@ -32,7 +32,7 @@ import logging
 from systemd.journal import JournalHandler
 
 # =============================================================================
-version = 1.2
+version = 1.3
 # =============================================================================
 log = logging.getLogger('performancemonitor')
 log.setLevel(logging.INFO)
@@ -622,23 +622,40 @@ class Containers:
 			self._container_names[j['Names']] = j
 			self._container_ids[id] = j
 
-			aux = self.get_blkio(major_minor, f'/sys/fs/cgroup/blkio/docker/{id}*/blkio.throttle.io_service_bytes')
-			if aux is not None: j['blkio.service_bytes'] = aux
+			try:
+				cgroup_path = self._get_cgroup_blkio_path(id)
 
-			aux = self.get_blkio(major_minor, f'/sys/fs/cgroup/blkio/docker/{id}*/blkio.throttle.io_serviced')
-			if aux is not None: j['blkio.serviced'] = aux
+				for k, fname in [('blkio.service_bytes', 'blkio.throttle.io_service_bytes'),
+								 ('blkio.serviced', 'blkio.throttle.io_serviced')]:
+					fpath = os.path.join(cgroup_path, fname)
+					try:
+						if os.path.isfile(fpath):
+							j[k] = self._get_blkio(major_minor, fpath)
+							# log.debug(f'Container {j.get("Names")} [{k}]: {j[k]}')
+						else:
+							log.error(f'Container {j.get("Names")}: file {fpath} does not exist')
 
-	def get_blkio(self, major_minor, filename):
+					except Exception as e:
+						log.error(f'Container {j.get("Names")} exception: {str(e)}')
+
+			except Exception as e:
+				log.error(f'Container {j.get("Names")} exception: {str(e)}')
+
+	def _get_cgroup_blkio_path(self, container_id):
+		base_directory = '/sys/fs/cgroup/blkio/docker'
+		for i in os.listdir(base_directory):
+			aux = os.path.join(base_directory, i)
+			if i.find(container_id) == 0 and os.path.isdir(aux):
+				return aux
+		raise Exception(f'directory "{base_directory}/{container_id}*" not found')
+
+	def _get_blkio(self, major_minor, filename):
 		ret = {}
-		cmd = f"cat {filename}"
-		exitcode, output = subprocess.getstatusoutput(cmd)
-		if exitcode != 0:
-			log.error(f'get_blkio command "{cmd}" returned error {exitcode}')
-			return None
-		for l in output.splitlines():
-			r = re.findall(f'{major_minor} ([^ ]+) (.*)', l)
-			if len(r) > 0:
-				ret[r[0][0]] = r[0][1]
+		with open(filename, 'rt') as f:
+			for l in f:
+				r = re.findall(f'{major_minor} ([^ ]+) (.*)', l)
+				if len(r) > 0:
+					ret[r[0][0]] = r[0][1]
 		return ret
 
 	def names(self):
