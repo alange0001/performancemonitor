@@ -29,10 +29,9 @@ import json
 import re
 import traceback
 import logging
-from systemd.journal import JournalHandler
 
 # =============================================================================
-version = 1.3
+version = 1.4
 # =============================================================================
 log = logging.getLogger('performancemonitor')
 log.setLevel(logging.INFO)
@@ -52,9 +51,15 @@ class ArgsWrapper:  # single global instance "args"
 		parser.add_argument('-d', '--device', type=str,
 			default='sda',
 			help='disk device name')
+		parser.add_argument('-r', '--chroot', type=str,
+			default='',
+			help='chroot used to access /proc and /sys')
 		parser.add_argument('-s', '--smart',
 			default=False, action="store_true",
 			help='smartctl data (root required)')
+		parser.add_argument('--no_iostat',
+			default=False, action="store_true",
+			help='disable iostat')
 		parser.add_argument('-o', '--log_handler', type=str,
 			default='stderr', choices=[ 'journal', 'stderr' ],
 			help='log handler')
@@ -73,6 +78,7 @@ class ArgsWrapper:  # single global instance "args"
 			raise Exception(f'parameter error: invalid disk device name: "{args.device}"')
 
 		if args.log_handler == 'journal':
+			from systemd.journal import JournalHandler
 			log_h = JournalHandler()
 			log_h.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
 		else:
@@ -100,12 +106,14 @@ class Program: # single instance
 	def main(self):
 		ret = 0
 		try:
-			log.info("Program initiated")
+			log.info(f"performancemonitor version {version}")
 			for i in ('SIGINT', 'SIGTERM'):
 				signal.signal(getattr(signal, i),
 				              lambda signumber, stack, signame=i: self.signal_handler(signame, signumber, stack))
 
 			get_sys_info()
+
+			Stats.check_paths()
 
 			IoStat().start()
 			time.sleep(1)
@@ -365,6 +373,18 @@ class StatReport:
 class Stats:
 	raw_data = None
 
+	@classmethod
+	def check_paths(cls):
+		for check_path in [
+			f'{args.chroot}/sys/fs/cgroup/blkio',
+			f'{args.chroot}/sys/block/{args.device}/queue',
+			f'{args.chroot}/proc/diskstats',
+		]:
+			try:
+				os.stat(check_path)
+			except Exception as e:
+				log.error(f'Failed to access path "{check_path}". Possible incomplete stats.')
+
 	def __init__(self):
 		self.raw_data = collections.OrderedDict()
 		self._get_time()
@@ -393,12 +413,12 @@ class Stats:
 	def _get_disk(self):
 		self.raw_data['disk'] = collections.OrderedDict()
 
-		exitcode, output = subprocess.getstatusoutput(f"cat /sys/block/{args.device}/queue/hw_sector_size")
+		exitcode, output = subprocess.getstatusoutput(f"cat {args.chroot}/sys/block/{args.device}/queue/hw_sector_size")
 		if exitcode != 0:
 			raise Exception(f'failed to get the sector size of device {args.device}')
 		self.raw_data['disk']['sector_size'] = int(output)
 
-		exitcode, output = subprocess.getstatusoutput(f"grep '{args.device} ' /proc/diskstats")
+		exitcode, output = subprocess.getstatusoutput(f"grep '{args.device} ' {args.chroot}/proc/diskstats")
 		if exitcode != 0:
 			raise Exception(f'could not get diskstats from device {args.device}')
 		values = re.findall(r'(\w+)', output)
@@ -413,7 +433,7 @@ class Stats:
 			c += 1
 		self.raw_data['disk']['diskstats'] = d
 
-		with open(f'/sys/block/{args.device}/queue/scheduler', 'r') as schedfile:
+		with open(f'{args.chroot}/sys/block/{args.device}/queue/scheduler', 'r') as schedfile:
 			s = re.findall(r'\[([^\]]+)\]', schedfile.readlines()[0])
 			if len(s) > 0:
 				self.raw_data['disk']['scheduler'] = s[0]
@@ -448,7 +468,7 @@ class Stats:
 					_data[_key] = _type(aux[0])
 
 		if args.smart:
-			cmd = f'smartctl -a "/dev/{args.device}"'
+			cmd = f'smartctl -a "{args.chroot}/dev/{args.device}"'
 			data = collections.OrderedDict()
 			self.raw_data['smart'] = data
 
@@ -499,6 +519,8 @@ class IoStat (threading.Thread):  # single instance
 		self._stats_lock = threading.Lock()
 
 	def run(self):
+		if args.no_iostat:
+			return
 		log.info('Starting subprocess iostat...')
 		cmd = shlex.split(f'iostat -xky -o JSON {self._interval} {self._device}')
 		try:
@@ -532,6 +554,8 @@ class IoStat (threading.Thread):  # single instance
 
 	@classmethod
 	def get_stats(cls, interval: int):
+		if args.no_iostat:
+			return None
 		if cls._self_ is None:
 			log.warning('IOstat not initiated')
 			return None
@@ -579,7 +603,7 @@ class Partitions:
 			log.debug('Partitions: load partitions')
 			self.__class__.data = {}
 			self.__class__.data_major_minor = {}
-			with open('/proc/partitions', 'r') as fd:
+			with open(f'{args.chroot}/proc/partitions', 'r') as fd:
 				lines = fd.readlines()
 				for l in lines:
 					r = re.findall(r'\s([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+(.+)', l)
@@ -642,7 +666,7 @@ class Containers:
 				log.error(f'Container {j.get("Names")} exception: {str(e)}')
 
 	def _get_cgroup_blkio_path(self, container_id):
-		base_directory = '/sys/fs/cgroup/blkio/docker'
+		base_directory = f'{args.chroot}/sys/fs/cgroup/blkio/docker'
 		for i in os.listdir(base_directory):
 			aux = os.path.join(base_directory, i)
 			if i.find(container_id) == 0 and os.path.isdir(aux):
