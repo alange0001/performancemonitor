@@ -46,13 +46,13 @@ class ArgsWrapper:  # single global instance "args"
 			default=config.get_default_port(),
 			help='device')
 		parser.add_argument('-i', '--interval', type=int,
-			default=5,
+			default=config.get_default_interval(),
 			help='stats interval')
 		parser.add_argument('-d', '--device', type=str,
-			default='sda',
+			default=config.get_default_device(),
 			help='disk device name')
 		parser.add_argument('-r', '--chroot', type=str,
-			default='',
+			default=config.get_default_chroot(),
 			help='chroot used to access /proc and /sys')
 		parser.add_argument('-s', '--smart',
 			default=False, action="store_true",
