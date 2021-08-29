@@ -468,7 +468,7 @@ class Stats:
 					_data[_key] = _type(aux[0])
 
 		if args.smart:
-			cmd = f'smartctl -a "{args.chroot}/dev/{args.device}"'
+			cmd = f'smartctl -a "/dev/{args.device}"'
 			data = collections.OrderedDict()
 			self.raw_data['smart'] = data
 
