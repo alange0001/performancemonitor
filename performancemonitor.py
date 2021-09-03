@@ -360,7 +360,7 @@ class StatReport:
 			if args.log_level == 'debug':
 				log.debug(f'StatReport smart : {self._data["smart"]}')
 
-		if args.log_level == 'debug':
+		if args.log_level == 'debug' and args.iostat:
 			try:
 				log.debug(f'StatReport iostat   : r/s={self._data["disk"]["iostat"]["r/s"]}, w/s={self._data["disk"]["iostat"]["w/s"]}')
 				log.debug(f'StatReport diskstats: r/s={self._data["disk"]["diskstats"]["r/s"]}, w/s={self._data["disk"]["diskstats"]["w/s"]}')
