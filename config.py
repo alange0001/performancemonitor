@@ -26,3 +26,15 @@ def get_default_device():
 def get_default_chroot():
 	env_val = os.getenv('PERFMON_CHROOT')
 	return '' if env_val is None else env_val
+
+def get_default_smart():
+	env_val = os.getenv('PERFMON_SMART')
+	return 'false' if env_val is None else env_val
+
+def get_default_iostat():
+	env_val = os.getenv('PERFMON_IOSTAT')
+	return 'true' if env_val is None else env_val
+
+def get_default_log_level():
+	env_val = os.getenv('PERFMON_LOG_LEVEL')
+	return 'info' if env_val is None or env_val.strip().lower() not in ('debug', 'info') else env_val

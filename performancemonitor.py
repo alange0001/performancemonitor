@@ -54,22 +54,25 @@ class ArgsWrapper:  # single global instance "args"
 		parser.add_argument('-r', '--chroot', type=str,
 			default=config.get_default_chroot(),
 			help='chroot used to access /proc and /sys')
-		parser.add_argument('-s', '--smart',
-			default=False, action="store_true",
-			help='smartctl data (root required)')
-		parser.add_argument('--no_iostat',
-			default=False, action="store_true",
-			help='disable iostat')
+		parser.add_argument('-s', '--smart', type=str,
+			default=config.get_default_smart(), nargs='?',
+			help='smartctl data (root required, true|false). Default false.')
+		parser.add_argument('--iostat', type=str,
+			default=config.get_default_iostat(), nargs='?',
+			help='use iostat (true|false). Default: true.')
 		parser.add_argument('-o', '--log_handler', type=str,
 			default='stderr', choices=[ 'journal', 'stderr' ],
 			help='log handler')
 		parser.add_argument('-l', '--log_level', type=str,
-			default='info', choices=[ 'debug', 'info' ],
+			default=config.get_default_log_level(), choices=[ 'debug', 'info' ],
 			help='log level')
 		parser.add_argument('-t', '--test', type=str,
 			default='',
 			help='test routines')
 		args = parser.parse_args()
+
+		args.smart = self._str_as_bool(args.smart, default=True)
+		args.iostat = self._str_as_bool(args.iostat, default=True)
 
 		if args.interval < 1:
 			raise Exception(f'parameter error: invalid interval: {args.interval}')
@@ -89,6 +92,18 @@ class ArgsWrapper:  # single global instance "args"
 		log.setLevel(getattr(logging, args.log_level.upper()))
 		log.info('Parameters: {}'.format(str(args)))
 		return args
+
+	def _str_as_bool(self, value:str, default=False, invalid=False):
+		if value is None:
+			return default
+		ev = value.strip().lower()
+		if ev == '':
+			return default
+		if ev in ['1', 't', 'true', 'y', 'yes']:
+			return True
+		if ev in ['0', 'f', 'false', 'n', 'no']:
+			return False
+		return invalid
 
 	def __getattr__(self, name):
 		global args
@@ -519,7 +534,7 @@ class IoStat (threading.Thread):  # single instance
 		self._stats_lock = threading.Lock()
 
 	def run(self):
-		if args.no_iostat:
+		if not args.iostat:
 			return
 		log.info('Starting subprocess iostat...')
 		cmd = shlex.split(f'iostat -xky -o JSON {self._interval} {self._device}')
@@ -554,7 +569,7 @@ class IoStat (threading.Thread):  # single instance
 
 	@classmethod
 	def get_stats(cls, interval: int):
-		if args.no_iostat:
+		if not args.iostat:
 			return None
 		if cls._self_ is None:
 			log.warning('IOstat not initiated')
