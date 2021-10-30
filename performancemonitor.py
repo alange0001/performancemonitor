@@ -31,7 +31,7 @@ import traceback
 import logging
 
 # =============================================================================
-version = 1.4
+version = 1.5
 # =============================================================================
 log = logging.getLogger('performancemonitor')
 log.setLevel(logging.INFO)
@@ -305,14 +305,16 @@ class StatReport:
 			sector_size = st_new.raw_data['disk']['sector_size']
 
 			for kr, kd in [
-						   ('r/s', 'read_count'), ('w/s', 'write_count'),
-						   ('r_sectors/s', 'read_sectors'), ('w_sectors/s', 'write_sectors')]:
+						   ('r/s', 'read_count'), ('w/s', 'write_count'), ('d/s', 'discard_count'),
+						   ('r_sectors/s', 'read_sectors'), ('w_sectors/s', 'write_sectors'),
+						   ('d_sectors/s', 'discard_sectors')]:
 				rep[kr] = (diskstats_new[kd] - diskstats_old[kd]) / self._delta_t
 
 			rep['rkB/s'] = ((diskstats_new['read_sectors'] - diskstats_old['read_sectors']) * sector_size) / (self._delta_t * 1024)
 			rep['wkB/s'] = ((diskstats_new['write_sectors'] - diskstats_old['write_sectors']) * sector_size) / (self._delta_t * 1024)
+			rep['dkB/s'] = ((diskstats_new['discard_sectors'] - diskstats_old['discard_sectors']) * sector_size) / (self._delta_t * 1024)
 
-			for k in ['read_time_ms', 'write_time_ms', 'io_time_ms', 'io_time_weighted_ms']:
+			for k in ['read_time_ms', 'write_time_ms', 'io_time_ms', 'io_time_weighted_ms', 'discard_time_ms']:
 				rep[k] = diskstats_new[k] - diskstats_old[k]
 			rep['cur_ios'] = diskstats_new['cur_ios']
 
@@ -442,7 +444,8 @@ class Stats:
 		c, d = 3, collections.OrderedDict()
 		for n in ['read_count',  'read_merges',  'read_sectors',  'read_time_ms',
 		          'write_count', 'write_merges', 'write_sectors', 'write_time_ms',
-		          'cur_ios', 'io_time_ms', 'io_time_weighted_ms']:
+		          'cur_ios', 'io_time_ms', 'io_time_weighted_ms',
+		          'discard_count', 'discard_merges', 'discard_sectors', 'discard_time_ms']:
 			if len(values) <= c: break
 			d[n] = int(values[c])
 			c += 1
