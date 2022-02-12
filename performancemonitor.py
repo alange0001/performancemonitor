@@ -492,6 +492,7 @@ class Stats:
 
 			exitcode, output = subprocess.getstatusoutput(cmd)
 			if exitcode != 0:
+				log.warning(f'smartctl output: {output}')
 				raise Exception(f'smartctl returned error {exitcode}')
 
 			get_val(data, 'model',            output, r'Model Number: +(.+)',                    str)
