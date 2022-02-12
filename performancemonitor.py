@@ -492,8 +492,7 @@ class Stats:
 
 			exitcode, output = subprocess.getstatusoutput(cmd)
 			if exitcode != 0:
-				log.warning(f'smartctl output: {output}')
-				raise Exception(f'smartctl returned error {exitcode}')
+				log.warning(f'smartctl returned error {exitcode}')
 
 			get_val(data, 'model',            output, r'Model Number: +(.+)',                    str)
 			get_val(data, 'serial',           output, r'Serial Number: +(.+)',                   str)
@@ -506,6 +505,9 @@ class Stats:
 			get_val(data, 'units_written',    output, r'Data Units Written: +([0-9.,]+)',        int, True)
 			get_val(data, 'read_commands',    output, r'Host Read Commands: +([0-9.,]+)',        int, True)
 			get_val(data, 'write_commands',   output, r'Host Write Commands: +([0-9.,]+)',       int, True)
+
+			if len(data) == 0:
+				log.error(f'failed to parse data from smartctl output: {output}')
 
 	# log.debug(f'_get_smart(): data = {data}')
 
